@@ -141,6 +141,11 @@ static void recordControllerInputCallback(
 ) {
     CFTimeInterval now = CACurrentMediaTime();
     NSUInteger callbackCount;
+    NSString *resolvedChangedElementName = changedElementName.length > 0
+        ? changedElementName
+        : ([source isEqualToString:@"generic"]
+            ? diagnosticPhysicalNameForElement(profile, changedElement)
+            : @"");
     NSMutableArray<NSDictionary<NSString *, id> *> *physicalButtonEdges = nil;
     BOOL shouldRecord = NO;
     NSString *captureReason = @"periodic_idle_sample";
@@ -149,16 +154,16 @@ static void recordControllerInputCallback(
         if (controller.diagnosticPhysicalButtonStates == nil) {
             controller.diagnosticPhysicalButtonStates = [NSMutableDictionary dictionary];
         }
-        if ([changedElement isKindOfClass:[GCControllerButtonInput class]] && changedElementName.length > 0) {
+        if ([changedElement isKindOfClass:[GCControllerButtonInput class]] && resolvedChangedElementName.length > 0) {
             GCControllerButtonInput *button = (GCControllerButtonInput *)changedElement;
             NSNumber *pressed = button.pressed ? @YES : @NO;
-            NSNumber *previous = controller.diagnosticPhysicalButtonStates[changedElementName];
+            NSNumber *previous = controller.diagnosticPhysicalButtonStates[resolvedChangedElementName];
             if ((previous != nil && previous.boolValue != pressed.boolValue) ||
                 (previous == nil && pressed.boolValue)) {
                 if (physicalButtonEdges == nil) physicalButtonEdges = [NSMutableArray array];
-                [physicalButtonEdges addObject:@{@"physical_control": changedElementName, @"pressed": pressed}];
+                [physicalButtonEdges addObject:@{@"physical_control": resolvedChangedElementName, @"pressed": pressed}];
             }
-            controller.diagnosticPhysicalButtonStates[changedElementName] = pressed;
+            controller.diagnosticPhysicalButtonStates[resolvedChangedElementName] = pressed;
         }
 
         BOOL hadMeaningfulInput = controller.diagnosticHadMeaningfulPhysicalInput;
@@ -209,7 +214,7 @@ static void recordControllerInputCallback(
     fields[@"physical_button_states"] = physicalButtonStates;
     fields[@"physical_button_edges"] = physicalButtonEdges ?: @[];
     fields[@"physical_analog_values"] = physicalAnalogValues;
-    fields[@"changed_physical_element"] = changedElementName ?: @"";
+    fields[@"changed_physical_element"] = resolvedChangedElementName ?: @"";
     fields[@"changed_element_class"] = changedElement != nil ? NSStringFromClass(changedElement.class) : @"";
     @synchronized (controller) {
         fields[@"has_received_input"] = @(controller.hasReceivedInput);
