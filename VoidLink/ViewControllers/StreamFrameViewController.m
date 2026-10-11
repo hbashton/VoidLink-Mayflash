@@ -1742,7 +1742,12 @@ static __weak StreamFrameViewController *VLSharedStreamFrameViewController = nil
     Log(LOG_I, @"Connection terminated: %d", errorCode);
     
     unsigned int portFlags = LiGetPortFlagsFromTerminationErrorCode(errorCode);
-    unsigned int portTestResults = LiTestClientConnectivity(CONN_TEST_SERVER, 443, portFlags);
+    // A clean user-requested disconnect does not need a network diagnosis.
+    // Keep the native connection callback short so LiStopConnection can finish
+    // promptly; the probe is still useful for unexpected failures.
+    unsigned int portTestResults = errorCode == ML_ERROR_GRACEFUL_TERMINATION
+        ? 0
+        : LiTestClientConnectivity(CONN_TEST_SERVER, 443, portFlags);
     
     dispatch_async(dispatch_get_main_queue(), ^{
         // Allow the display to go to sleep now

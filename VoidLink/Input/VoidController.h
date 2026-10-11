@@ -70,6 +70,7 @@ typedef NS_ENUM(NSInteger, ControllerDeviceBatteryState) {
 @property (nonatomic)                   BOOL reportedArrival;
 @property (nonatomic)                   BOOL waitsForInputBeforeArrival;
 @property (nonatomic)                   BOOL hasReceivedInput;
+@property (nonatomic)                   BOOL acceptsInput;
 @property (nonatomic)                   VoidController* _Nullable mergedWithController;
 
 @property(nonatomic, strong) NSMutableSet* _Nullable motionTypes;
