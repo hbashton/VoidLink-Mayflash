@@ -9,8 +9,22 @@
 #ifndef Limelight_Logger_h
 #define Limelight_Logger_h
 
+#import <Foundation/Foundation.h>
+#import <QuartzCore/QuartzCore.h>
 #import <dispatch/dispatch.h>
 #import <stdarg.h>
+
+NS_ASSUME_NONNULL_BEGIN
+
+/// Small, opt-in-to-export diagnostic trace for controller/stream failures.
+/// Events are recorded asynchronously to a bounded file in Caches and can be
+/// exported by the user after reproducing a problem.
+@interface ControllerDiagnostics : NSObject
++ (void)recordEvent:(NSString *)event fields:(NSDictionary<NSString *, id> *)fields;
++ (NSURL *)exportURL;
+@end
+
+NS_ASSUME_NONNULL_END
 
 #ifdef __cplusplus
 extern "C" {

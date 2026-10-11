@@ -11,6 +11,7 @@
 #import "SceneDelegate.h"
 #import "Connection.h"
 #import "ControllerSupport.h"
+#import "Logger.h"
 #import "OnScreenControls.h"
 #import "OnScreenButtonState.h"
 #import "DataManager.h"

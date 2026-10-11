@@ -8,6 +8,7 @@
 
 #import "HapticContext.h"
 #include <stdint.h>
+#include <CoreFoundation/CoreFoundation.h>
 
 @import GameController;
 @import CoreHaptics;
@@ -80,6 +81,18 @@ typedef NS_ENUM(NSInteger, ControllerDeviceBatteryState) {
 @property (nonatomic)                   BOOL acceptsInput;
 @property (nonatomic)                   BOOL didLogControllerArrivalFailure;
 @property (nonatomic)                   BOOL didLogControllerInputFailure;
+@property (nonatomic)                   BOOL didLogArrivalDeferred;
+@property (nonatomic, copy, nullable)    NSString *diagnosticID;
+@property (nonatomic)                   NSUInteger diagnosticInputCallbacks;
+@property (nonatomic)                   NSUInteger diagnosticInputSnapshotsProcessed;
+@property (nonatomic)                   NSUInteger diagnosticInputPacketsSent;
+@property (nonatomic)                   NSUInteger diagnosticArrivalAttempts;
+@property (nonatomic)                   CFTimeInterval diagnosticLastCallbackLogTime;
+@property (nonatomic)                   CFTimeInterval diagnosticLastWorkerLogTime;
+@property (nonatomic)                   CFTimeInterval diagnosticCurrentSnapshotCapturedAt;
+@property (nonatomic)                   CFTimeInterval diagnosticLastSendLogTime;
+@property (nonatomic)                   CFTimeInterval diagnosticLastArrivalLogTime;
+@property (nonatomic)                   CFTimeInterval diagnosticLastPortAssignmentFailureTime;
 @property (nonatomic)                   VoidController* _Nullable mergedWithController;
 
 @property(nonatomic, strong) NSMutableSet* _Nullable motionTypes;

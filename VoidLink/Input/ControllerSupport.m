@@ -15,6 +15,7 @@
 #import "VoidLink-Swift.h"
 
 #import "DataManager.h"
+#import "Logger.h"
 #include "Limelight.h"
 #include <stdatomic.h>
 #include <math.h>
@@ -38,6 +39,116 @@ static CGFloat normalizedTriggerInput(CGFloat value) {
 
 static unsigned char triggerValueToByte(CGFloat value) {
     return (unsigned char)lrint(normalizedTriggerInput(value) * 255.0);
+}
+
+static NSString *diagnosticLogicalControlName(NSInteger elementFlag) {
+    if (elementFlag == ControllerElementStart) return @"start";
+    if (elementFlag == ControllerElementLeftTrigger) return @"left_trigger";
+    if (elementFlag == ControllerElementRightTrigger) return @"right_trigger";
+    return [NSString stringWithFormat:@"0x%lx", (unsigned long)elementFlag];
+}
+
+static NSArray<NSDictionary<NSString *, id> *> *diagnosticMappedControls(
+    NSDictionary<NSNumber *, GCControllerElement *> *elementMap,
+    GCPhysicalInputProfile *profile
+) {
+    NSMutableArray<NSDictionary<NSString *, id> *> *mappedControls = [NSMutableArray array];
+    NSDictionary<NSString *, GCControllerElement *> *physicalElements = @{};
+    if (@available(iOS 14.0, tvOS 14.0, *)) {
+        physicalElements = profile.allElements;
+    }
+    [elementMap enumerateKeysAndObjectsUsingBlock:^(NSNumber *elementFlag, GCControllerElement *element, BOOL *stop) {
+        NSMutableArray<NSString *> *physicalNames = [NSMutableArray array];
+        [physicalElements enumerateKeysAndObjectsUsingBlock:^(NSString *name, GCControllerElement *physicalElement, BOOL *innerStop) {
+            if (physicalElement == element) [physicalNames addObject:name];
+        }];
+        [mappedControls addObject:@{
+            @"logical_flag": elementFlag,
+            @"logical_control": diagnosticLogicalControlName(elementFlag.integerValue),
+            @"physical_elements": physicalNames
+        }];
+    }];
+    return mappedControls;
+}
+
+static NSDictionary<NSString *, id> *diagnosticCommonControllerFields(VoidController *controller) {
+    GCController *gamepad = controller.gamepad;
+    return @{
+        @"device_id": controller.diagnosticID ?: @"unknown",
+        @"local_endpoint": @(controller.playerIndex),
+        @"sunshine_port": controller.streamPlayerIndex >= 0 ? @(controller.streamPlayerIndex + 1) : @0,
+        @"profile": gamepad.extendedGamepad != nil ? @"extended" : @"generic",
+        @"vendor": gamepad.vendorName ?: @"unknown",
+        @"product_category": gamepad.productCategory ?: @"unknown"
+    };
+}
+
+static void recordControllerInputCallback(
+    VoidController *controller,
+    NSString *source,
+    GCPhysicalInputProfile *profile,
+    NSDictionary<NSNumber *, NSNumber *> *buttonStates,
+    NSDictionary<NSNumber *, GCControllerElement *> *elementMap,
+    BOOL meaningfulInput,
+    CGFloat leftX,
+    CGFloat leftY,
+    CGFloat rightX,
+    CGFloat rightY,
+    CGFloat leftTrigger,
+    CGFloat rightTrigger
+) {
+    CFTimeInterval now = CACurrentMediaTime();
+    NSUInteger callbackCount;
+    BOOL shouldRecord;
+    @synchronized (controller) {
+        callbackCount = ++controller.diagnosticInputCallbacks;
+        shouldRecord = controller.diagnosticLastCallbackLogTime == 0 || now - controller.diagnosticLastCallbackLogTime >= 2.0;
+        if (shouldRecord) controller.diagnosticLastCallbackLogTime = now;
+    }
+    if (!shouldRecord) return;
+
+    NSMutableArray<NSDictionary<NSString *, id> *> *pressedControls = [NSMutableArray array];
+    [buttonStates enumerateKeysAndObjectsUsingBlock:^(NSNumber *elementFlag, NSNumber *pressed, BOOL *stop) {
+        if (pressed.boolValue) {
+            [pressedControls addObject:@{
+                @"logical_flag": elementFlag,
+                @"logical_control": diagnosticLogicalControlName(elementFlag.integerValue)
+            }];
+        }
+    }];
+
+    NSMutableDictionary<NSString *, id> *fields = [NSMutableDictionary dictionaryWithDictionary:diagnosticCommonControllerFields(controller)];
+    fields[@"source"] = source;
+    fields[@"callback_count"] = @(callbackCount);
+    fields[@"meaningful_input"] = @(meaningfulInput);
+    fields[@"pressed_controls"] = pressedControls;
+    fields[@"mapped_controls"] = diagnosticMappedControls(elementMap, profile);
+    fields[@"left_stick"] = @[@(leftX), @(leftY)];
+    fields[@"right_stick"] = @[@(rightX), @(rightY)];
+    fields[@"triggers"] = @[@(leftTrigger), @(rightTrigger)];
+    fields[@"controller_port_assignment"] = @"Port assignment occurs only after meaningful input; the first input requests the next free Sunshine port.";
+    [ControllerDiagnostics recordEvent:@"controller_input_callback" fields:fields];
+}
+
+static void recordControllerInputWorkerDequeued(VoidController *controller, CFTimeInterval capturedAt) {
+    CFTimeInterval now = CACurrentMediaTime();
+    NSUInteger processedCount;
+    NSUInteger callbackCount;
+    BOOL shouldRecord;
+    @synchronized (controller) {
+        processedCount = ++controller.diagnosticInputSnapshotsProcessed;
+        callbackCount = controller.diagnosticInputCallbacks;
+        controller.diagnosticCurrentSnapshotCapturedAt = capturedAt;
+        shouldRecord = controller.diagnosticLastWorkerLogTime == 0 || now - controller.diagnosticLastWorkerLogTime >= 2.0;
+        if (shouldRecord) controller.diagnosticLastWorkerLogTime = now;
+    }
+    if (!shouldRecord) return;
+
+    NSMutableDictionary<NSString *, id> *fields = [NSMutableDictionary dictionaryWithDictionary:diagnosticCommonControllerFields(controller)];
+    fields[@"callback_count"] = @(callbackCount);
+    fields[@"processed_snapshot_count"] = @(processedCount);
+    fields[@"callback_to_worker_ms"] = @((now - capturedAt) * 1000.0);
+    [ControllerDiagnostics recordEvent:@"controller_input_worker_dequeued" fields:fields];
 }
 
 static BOOL triggerValueIsDigitallyPressed(CGFloat value, BOOL wasPressed) {
@@ -965,6 +1076,19 @@ static BOOL triggerValueIsDigitallyPressed(CGFloat value, BOOL wasPressed) {
     }
 
     Log(LOG_W, @"No free Sunshine controller port for %@", voidController.gamepad.vendorName ?: @"controller");
+    CFTimeInterval now = CACurrentMediaTime();
+    BOOL shouldRecordFailure = NO;
+    @synchronized (voidController) {
+        shouldRecordFailure = voidController.diagnosticLastPortAssignmentFailureTime == 0 ||
+            now - voidController.diagnosticLastPortAssignmentFailureTime >= 3.0;
+        if (shouldRecordFailure) voidController.diagnosticLastPortAssignmentFailureTime = now;
+    }
+    if (shouldRecordFailure) {
+        NSMutableDictionary<NSString *, id> *fields = [NSMutableDictionary dictionaryWithDictionary:diagnosticCommonControllerFields(voidController)];
+        fields[@"active_port_mask"] = @(_controllerNumbers);
+        fields[@"reserved_port_mask"] = @(_reservedControllerNumbers);
+        [ControllerDiagnostics recordEvent:@"controller_port_assignment_failed" fields:fields];
+    }
     return NO;
 }
 
@@ -992,6 +1116,10 @@ static BOOL triggerValueIsDigitallyPressed(CGFloat value, BOOL wasPressed) {
     }
 
     uint16_t previouslyActiveMask = [self getActiveGamepadMask];
+    [ControllerDiagnostics recordEvent:@"controller_order_reset" fields:@{
+        @"previous_active_port_mask": @(previouslyActiveMask),
+        @"endpoint_count": @(_voidControllers.count)
+    }];
     _controllerNumbers = 0;
     _reservedControllerNumbers = 0;
     for (VoidController* controller in _voidControllers.allValues) {
@@ -1017,6 +1145,7 @@ static BOOL triggerValueIsDigitallyPressed(CGFloat value, BOOL wasPressed) {
             controller.streamPlayerIndex = -1;
             controller.reportedArrival = NO;
             controller.hasReceivedInput = NO;
+            controller.didLogArrivalDeferred = NO;
             controller.requiresButtonReleaseAfterOrderReset = hasButtonHeld;
             controller.radialMenuButtonPressed = NO;
             controller.leftTriggerDigitallyPressed = NO;
@@ -1103,6 +1232,37 @@ static BOOL triggerValueIsDigitallyPressed(CGFloat value, BOOL wasPressed) {
                                                          [self getActiveGamepadMask],
                                                          buttonFlags, leftTrigger, rightTrigger,
                                                          leftStickX, leftStickY, rightStickX, rightStickY);
+            CFTimeInterval now = CACurrentMediaTime();
+            BOOL shouldRecordSendSummary = NO;
+            NSUInteger inputPacketCount = 0;
+            NSUInteger callbackCount = 0;
+            NSUInteger processedSnapshotCount = 0;
+            CFTimeInterval callbackCapturedAt = 0;
+            @synchronized (controller) {
+                inputPacketCount = ++controller.diagnosticInputPacketsSent;
+                callbackCount = controller.diagnosticInputCallbacks;
+                processedSnapshotCount = controller.diagnosticInputSnapshotsProcessed;
+                callbackCapturedAt = controller.diagnosticCurrentSnapshotCapturedAt;
+                shouldRecordSendSummary = inputResult != 0
+                    ? (controller.diagnosticLastSendLogTime == 0 || now - controller.diagnosticLastSendLogTime >= 3.0)
+                    : (controller.diagnosticLastSendLogTime == 0 || now - controller.diagnosticLastSendLogTime >= 2.0);
+                if (shouldRecordSendSummary) controller.diagnosticLastSendLogTime = now;
+            }
+            if (shouldRecordSendSummary) {
+                NSMutableDictionary<NSString *, id> *fields = [NSMutableDictionary dictionaryWithDictionary:diagnosticCommonControllerFields(controller)];
+                fields[@"send_result"] = @(inputResult);
+                fields[@"send_semantics"] = @"Zero is the client API success result; it is not a host acknowledgement.";
+                fields[@"input_packet_count"] = @(inputPacketCount);
+                fields[@"callback_count"] = @(callbackCount);
+                fields[@"processed_snapshot_count"] = @(processedSnapshotCount);
+                fields[@"active_port_mask"] = @([self getActiveGamepadMask]);
+                fields[@"button_flags"] = [NSString stringWithFormat:@"0x%08x", buttonFlags];
+                fields[@"triggers"] = @[@(leftTrigger), @(rightTrigger)];
+                fields[@"left_stick"] = @[@(leftStickX), @(leftStickY)];
+                fields[@"right_stick"] = @[@(rightStickX), @(rightStickY)];
+                if (callbackCapturedAt > 0) fields[@"callback_to_send_ms"] = @((now - callbackCapturedAt) * 1000.0);
+                [ControllerDiagnostics recordEvent:@"controller_input_send_summary" fields:fields];
+            }
             if (inputResult != 0 && !controller.didLogControllerInputFailure) {
                 Log(LOG_E, @"Could not send controller state for Sunshine P%d (error %d)",
                     controller.streamPlayerIndex + 1,
@@ -1113,6 +1273,7 @@ static BOOL triggerValueIsDigitallyPressed(CGFloat value, BOOL wasPressed) {
                 controller.didLogControllerInputFailure = NO;
             }
         }
+        controller.diagnosticCurrentSnapshotCapturedAt = 0;
     }
     [_controllerStreamLock unlock];
     
@@ -1280,6 +1441,10 @@ static BOOL triggerValueIsDigitallyPressed(CGFloat value, BOOL wasPressed) {
     if (voidController.waitsForInputBeforeArrival) {
         @synchronized (voidController) {
             if (!voidController.hasReceivedInput) {
+                if (!voidController.didLogArrivalDeferred) {
+                    voidController.didLogArrivalDeferred = YES;
+                    [ControllerDiagnostics recordEvent:@"controller_arrival_deferred" fields:diagnosticCommonControllerFields(voidController)];
+                }
                 return NO;
             }
         }
@@ -1558,6 +1723,27 @@ static BOOL triggerValueIsDigitallyPressed(CGFloat value, BOOL wasPressed) {
                                                       type,
                                                       supportedButtonFlags,
                                                       capabilities);
+    CFTimeInterval now = CACurrentMediaTime();
+    NSUInteger arrivalAttempts;
+    BOOL shouldRecordArrival;
+    @synchronized (voidController) {
+        arrivalAttempts = ++voidController.diagnosticArrivalAttempts;
+        shouldRecordArrival = arrivalResult == 0 || voidController.diagnosticLastArrivalLogTime == 0 ||
+            now - voidController.diagnosticLastArrivalLogTime >= 3.0;
+        if (shouldRecordArrival) voidController.diagnosticLastArrivalLogTime = now;
+    }
+    if (shouldRecordArrival) {
+        NSMutableDictionary<NSString *, id> *fields = [NSMutableDictionary dictionaryWithDictionary:diagnosticCommonControllerFields(voidController)];
+        fields[@"send_result"] = @(arrivalResult);
+        fields[@"attempt"] = @(arrivalAttempts);
+        fields[@"active_port_mask"] = @([self getActiveGamepadMask]);
+        fields[@"supported_button_flags"] = [NSString stringWithFormat:@"0x%08x", supportedButtonFlags];
+        fields[@"controller_type"] = @(type);
+        fields[@"capabilities"] = @(capabilities);
+        fields[@"has_received_input"] = @(voidController.hasReceivedInput);
+        fields[@"send_semantics"] = @"Zero is the client API success result; it is not a host acknowledgement.";
+        [ControllerDiagnostics recordEvent:@"controller_arrival_send" fields:fields];
+    }
     if (arrivalResult != 0) {
         if (!voidController.didLogControllerArrivalFailure) {
             Log(LOG_E, @"Could not announce %@ as Sunshine P%d (error %d); will retry on the next input",
@@ -1883,6 +2069,12 @@ double rc_expo(double x, double expo) {
             fabs(rightX) >= 0.15 || fabs(rightY) >= 0.15 ||
             primaryTouchActive || secondaryTouchActive;
 
+        CFTimeInterval callbackCapturedAt = CACurrentMediaTime();
+        recordControllerInputCallback(voidController, @"extended", controller.physicalInputProfile,
+                                      buttonStates, elementDict, hasMeaningfulInput,
+                                      leftX, leftY, rightX, rightY,
+                                      leftTriggerValue, rightTriggerValue);
+
         // Streaming radial-menu input is always logical Start. Do not read the
         // app-primary setting here: it can still be RT while P1 is switching
         // from the pre-stream controller to a generic adapter endpoint.
@@ -1892,6 +2084,7 @@ double rc_expo(double x, double expo) {
             controllerNavigatorEnabled = ControllerNavigator.enabled;
         }
         dispatch_async(self->_controllerInputQueue, ^{
+            recordControllerInputWorkerDequeued(voidController, callbackCapturedAt);
             BOOL newlyClaimedSlot = NO;
             @synchronized (voidController) {
                 if (!voidController.acceptsInput || voidController.gamepad != controller ||
@@ -1910,6 +2103,7 @@ double rc_expo(double x, double expo) {
             if (newlyClaimedSlot) {
                 Log(LOG_I, @"Controller %@ received its first input; requesting a Sunshine port",
                     controller.vendorName ?: @"controller");
+                [ControllerDiagnostics recordEvent:@"controller_first_input_claimed" fields:diagnosticCommonControllerFields(voidController)];
                 [self->_controllerStreamLock lock];
                 [self reportControllerArrivalLocked:voidController];
                 [self->_controllerStreamLock unlock];
@@ -2092,6 +2286,12 @@ double rc_expo(double x, double expo) {
 
         NSDictionary<NSNumber *, NSNumber *> *buttonStates = [capturedButtonStates copy];
 
+        CFTimeInterval callbackCapturedAt = CACurrentMediaTime();
+        recordControllerInputCallback(voidController, @"generic", profile,
+                                      buttonStates, elementDict, hasMeaningfulInput,
+                                      leftX, leftY, rightX, rightY,
+                                      leftTriggerValue, rightTriggerValue);
+
         // Use the same stable logical Start control for generic profiles. The
         // global menu-button value can lag behind the stream transition and
         // otherwise turn GameCube RT into the menu button.
@@ -2101,6 +2301,7 @@ double rc_expo(double x, double expo) {
             controllerNavigatorEnabled = ControllerNavigator.enabled;
         }
         dispatch_async(self->_controllerInputQueue, ^{
+            recordControllerInputWorkerDequeued(voidController, callbackCapturedAt);
             BOOL newlyClaimedSlot = NO;
             @synchronized (voidController) {
                 if (!voidController.acceptsInput || voidController.gamepad != controller ||
@@ -2119,6 +2320,7 @@ double rc_expo(double x, double expo) {
             if (newlyClaimedSlot) {
                 Log(LOG_I, @"Generic controller %@ received its first input; requesting a Sunshine port",
                     controller.vendorName ?: @"controller");
+                [ControllerDiagnostics recordEvent:@"controller_first_input_claimed" fields:diagnosticCommonControllerFields(voidController)];
                 [self->_controllerStreamLock lock];
                 [self reportControllerArrivalLocked:voidController];
                 [self->_controllerStreamLock unlock];
@@ -2310,6 +2512,17 @@ double rc_expo(double x, double expo) {
             else if (@available(iOS 16.0, tvOS 16.0, *)) {
                 [self listenToGenericGCController:controller];
             }
+
+            VoidController *voidController = [self voidControllerForGamepadLocked:controller];
+            NSMutableDictionary<NSString *, id> *fields = voidController
+                ? [NSMutableDictionary dictionaryWithDictionary:diagnosticCommonControllerFields(voidController)]
+                : [NSMutableDictionary dictionary];
+            fields[@"listener"] = controller.extendedGamepad != nil ? @"extended_gamepad" : @"generic_physical_profile";
+            fields[@"legacy_pause_handler"] = @(useLegacyPausedHandler);
+            if (@available(iOS 14.0, tvOS 14.0, *)) {
+                fields[@"physical_elements"] = controller.physicalInputProfile.allElements.allKeys ?: @[];
+            }
+            [ControllerDiagnostics recordEvent:@"controller_callbacks_registered" fields:fields];
         }
     } else {
         Log(LOG_W, @"Tried to register controller callbacks on NULL controller");
@@ -2473,6 +2686,7 @@ double rc_expo(double x, double expo) {
     voidController.motionTypes = [[NSMutableSet alloc] init];
     voidController.supportedEmulationFlags = EMULATING_SPECIAL | EMULATING_SELECT;
     voidController.gamepad = controller;
+    if (voidController.diagnosticID == nil) voidController.diagnosticID = NSUUID.UUID.UUIDString;
     // Every physical device waits for a deliberate button press before taking
     // a Sunshine port. This also covers ordinary Bluetooth gamepads.
     voidController.waitsForInputBeforeArrival = YES;
@@ -2562,6 +2776,7 @@ double rc_expo(double x, double expo) {
     }
 
     VoidController* voidController = [[VoidController alloc] init];
+    voidController.diagnosticID = NSUUID.UUID.UUIDString;
     voidController.playerIndex = localIndex;
     voidController.streamPlayerIndex = -1;
     @synchronized (voidController) {
@@ -2573,6 +2788,12 @@ double rc_expo(double x, double expo) {
     [_voidControllers setObject:voidController forKey:@(localIndex)];
 
     Log(LOG_I, @"Tracking controller endpoint locally as %d; waiting for its first button press", localIndex);
+    NSMutableDictionary<NSString *, id> *fields = [NSMutableDictionary dictionaryWithDictionary:diagnosticCommonControllerFields(voidController)];
+    fields[@"waits_for_input_before_arrival"] = @(voidController.waitsForInputBeforeArrival);
+    if (@available(iOS 14.0, tvOS 14.0, *)) {
+        fields[@"physical_elements"] = controller.physicalInputProfile.allElements.allKeys ?: @[];
+    }
+    [ControllerDiagnostics recordEvent:@"controller_endpoint_assigned_locally" fields:fields];
     return voidController;
 }
 
@@ -2646,6 +2867,7 @@ double rc_expo(double x, double expo) {
     [_controllerStreamLock lock];
     for (GCController* controller in [GCController controllers]) {
         NSLog(@"controller count: iterating");
+        recordControllerDiscovery(controller, @"stream_start_enumeration");
         
         if ([ControllerSupport isSupportedGamepad:controller]) {
             NSLog(@"controller count: is supported,is contained by dict: %d", [ControllerUtil.activeStreamingGCControllers containsObject:controller]);
@@ -2706,6 +2928,14 @@ double rc_expo(double x, double expo) {
     stickMaxOffset = 0x7FFE;
     _leftStickMinOffset = oscProfile.physicalLeftStickMinOffset;
     _rightStickMinOffset = oscProfile.physicalRightStickMinOffset;
+
+    [ControllerDiagnostics recordEvent:@"controller_stream_configured" fields:@{
+        @"multi_controller": @(_multiController),
+        @"swap_abxy": @(_swapABXYButtons),
+        @"controller_navigation_enabled": @(_controllerNavigationEnabled),
+        @"emulated_controller_type": @(streamConfig.emulatedControllerType),
+        @"trigger_deadzone": @(ControllerUtil.controllerTriggerDeadzone)
+    }];
 
 }
 
@@ -2783,6 +3013,7 @@ double rc_expo(double x, double expo) {
     Log(LOG_I, @"Controller connected!");
     
     GCController* controller = note.object;
+    recordControllerDiscovery(controller, @"connect_notification");
     
     if (![ControllerSupport isSupportedGamepad:controller]) {
         // Ignore micro gamepads and motion controllers
@@ -2834,6 +3065,17 @@ double rc_expo(double x, double expo) {
             }
         }
         [self->_controllerStreamLock unlock];
+
+        NSMutableDictionary<NSString *, id> *disconnectFields = voidController
+            ? [NSMutableDictionary dictionaryWithDictionary:diagnosticCommonControllerFields(voidController)]
+            : [NSMutableDictionary dictionaryWithDictionary:@{
+                @"vendor": controller.vendorName ?: @"unknown",
+                @"product_category": controller.productCategory ?: @"unknown",
+                @"profile": controller.extendedGamepad != nil ? @"extended" : @"generic"
+            }];
+        disconnectFields[@"reported_arrival"] = @(voidController.reportedArrival);
+        disconnectFields[@"had_received_input"] = @(voidController.hasReceivedInput);
+        [ControllerDiagnostics recordEvent:@"controller_disconnected" fields:disconnectFields];
 
         [self unregisterControllerCallbacks:controller];
         // Finish already-captured controller input before its player slot can be reused.
@@ -3015,8 +3257,32 @@ double rc_expo(double x, double expo) {
 }
 
 -(void)connectionEstablished {
+    NSMutableArray<NSDictionary<NSString *, id> *> *endpoints = [NSMutableArray array];
+    for (VoidController *controller in _voidControllers.allValues) {
+        [endpoints addObject:@{
+            @"device_id": controller.diagnosticID ?: @"unknown",
+            @"local_endpoint": @(controller.playerIndex),
+            @"sunshine_port": controller.streamPlayerIndex >= 0 ? @(controller.streamPlayerIndex + 1) : @0,
+            @"waits_for_input": @(controller.waitsForInputBeforeArrival),
+            @"has_received_input": @(controller.hasReceivedInput),
+            @"arrival_reported": @(controller.reportedArrival)
+        }];
+    }
+    [ControllerDiagnostics recordEvent:@"stream_connection_established" fields:@{
+        @"multi_controller": @(_multiController),
+        @"active_port_mask": @([self getActiveGamepadMask]),
+        @"controller_endpoints": endpoints
+    }];
+
     for (VoidController* voidController in _voidControllers.allValues) {
-        if (voidController.waitsForInputBeforeArrival) [self updateFinished:voidController];
+        if (voidController.waitsForInputBeforeArrival) {
+            if (!voidController.hasReceivedInput && !voidController.didLogArrivalDeferred) {
+                voidController.didLogArrivalDeferred = YES;
+                [ControllerDiagnostics recordEvent:@"controller_arrival_waiting_for_first_input"
+                                             fields:diagnosticCommonControllerFields(voidController)];
+            }
+            [self updateFinished:voidController];
+        }
     }
     
     //if (_oscEnabled
@@ -3097,6 +3363,10 @@ double rc_expo(double x, double expo) {
 
 -(void) cleanup
 {
+    [ControllerDiagnostics recordEvent:@"controller_support_cleanup" fields:@{
+        @"endpoint_count": @(_voidControllers.count),
+        @"active_port_mask": @([self getActiveGamepadMask])
+    }];
     @synchronized (self) {
         _isCleaningUp = YES;
     }

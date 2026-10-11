@@ -27,6 +27,7 @@
 #import "LocalizationHelper.h"
 #import "VoidLink-Swift.h"
 #import "NativeTouchPointer.h"
+#import "Logger.h"
 
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -1698,6 +1699,10 @@ static __weak StreamFrameViewController *VLSharedStreamFrameViewController = nil
 
 - (void) connectionStarted {
     Log(LOG_I, @"Connection started");
+    [ControllerDiagnostics recordEvent:@"stream_connection_started" fields:@{
+        @"connected_controller_count": @([ControllerSupport getGamepadCount]),
+        @"timestamp_source": @"StreamFrameViewController connectionStarted callback"
+    }];
     dispatch_async(dispatch_get_main_queue(), ^{
         // Leave the spinner spinning until it's obscured by
         // the first frame of video.
@@ -1740,6 +1745,9 @@ static __weak StreamFrameViewController *VLSharedStreamFrameViewController = nil
 #endif
 
     Log(LOG_I, @"Connection terminated: %d", errorCode);
+    [ControllerDiagnostics recordEvent:@"stream_connection_termination_callback" fields:@{
+        @"error_code": @(errorCode)
+    }];
     
     unsigned int portFlags = LiGetPortFlagsFromTerminationErrorCode(errorCode);
     // A clean user-requested disconnect does not need a network diagnosis.
@@ -1748,6 +1756,11 @@ static __weak StreamFrameViewController *VLSharedStreamFrameViewController = nil
     unsigned int portTestResults = errorCode == ML_ERROR_GRACEFUL_TERMINATION
         ? 0
         : LiTestClientConnectivity(CONN_TEST_SERVER, 443, portFlags);
+    [ControllerDiagnostics recordEvent:@"stream_connection_terminated" fields:@{
+        @"error_code": @(errorCode),
+        @"port_flags": @(portFlags),
+        @"connectivity_test_result": @(portTestResults)
+    }];
     
     dispatch_async(dispatch_get_main_queue(), ^{
         // Allow the display to go to sleep now
@@ -1831,6 +1844,9 @@ static __weak StreamFrameViewController *VLSharedStreamFrameViewController = nil
 
 - (void) stageStarting:(const char*)stageName {
     Log(LOG_I, @"Starting %s", stageName);
+    [ControllerDiagnostics recordEvent:@"stream_stage_started" fields:@{
+        @"stage": [NSString stringWithUTF8String:stageName ?: "unknown"]
+    }];
     return;
     dispatch_async(dispatch_get_main_queue(), ^{
         NSString* lowerCase = [NSString stringWithFormat:@"%s ...", stageName];
@@ -1903,6 +1919,9 @@ static __weak StreamFrameViewController *VLSharedStreamFrameViewController = nil
 }
 
 - (void) stageComplete:(const char*)stageName {
+    [ControllerDiagnostics recordEvent:@"stream_stage_completed" fields:@{
+        @"stage": [NSString stringWithUTF8String:stageName ?: "unknown"]
+    }];
     _micStreamInitialized = false;
     if (strcmp(stageName, "mic stream establishment") == 0) {
         dispatch_time_t delay = dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC));
@@ -1930,8 +1949,17 @@ static __weak StreamFrameViewController *VLSharedStreamFrameViewController = nil
 #endif
 
     Log(LOG_I, @"Stage %s failed: %d", stageName, errorCode);
+    [ControllerDiagnostics recordEvent:@"stream_stage_failed" fields:@{
+        @"stage": [NSString stringWithUTF8String:stageName ?: "unknown"],
+        @"error_code": @(errorCode),
+        @"port_test_flags": @(portTestFlags)
+    }];
     
     unsigned int portTestResults = LiTestClientConnectivity(CONN_TEST_SERVER, 443, portTestFlags);
+    [ControllerDiagnostics recordEvent:@"stream_stage_connectivity_test" fields:@{
+        @"stage": [NSString stringWithUTF8String:stageName ?: "unknown"],
+        @"result": @(portTestResults)
+    }];
 
     dispatch_async(dispatch_get_main_queue(), ^{
         // Allow the display to go to sleep now
@@ -1962,6 +1990,9 @@ static __weak StreamFrameViewController *VLSharedStreamFrameViewController = nil
 
 - (void) launchFailed:(NSString*)message {
     Log(LOG_I, @"Launch failed: %@", message);
+    [ControllerDiagnostics recordEvent:@"stream_launch_failed" fields:@{
+        @"message_length": @(message.length)
+    }];
     
     dispatch_async(dispatch_get_main_queue(), ^{
         // Allow the display to go to sleep now

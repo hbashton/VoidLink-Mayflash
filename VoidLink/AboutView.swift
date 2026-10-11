@@ -110,6 +110,41 @@ public struct AboutView: View {
                     if !PublicUtils.isIPhone {
                         Link(LocalizationHelper.localizedString(forKey: "joinCommunity"), destination: URL(string: LocalizationHelper.localizedString(forKey: "communityLink"))!)
                     }
+
+#if !os(tvOS)
+                    Button {
+                        let diagnosticsURL = ControllerDiagnostics.exportURL()
+                        guard FileManager.default.fileExists(atPath: diagnosticsURL.path) else {
+                            let alert = UIAlertController(
+                                title: "Could not export diagnostics",
+                                message: "VoidLink could not create the controller diagnostic file.",
+                                preferredStyle: .alert
+                            )
+                            alert.addAction(UIAlertAction(title: LocalizationHelper.localizedString(forKey: "OK"), style: .default))
+                            aboutVC.present(alert, animated: true)
+                            return
+                        }
+
+                        let activityController = UIActivityViewController(activityItems: [diagnosticsURL], applicationActivities: nil)
+                        if let popover = activityController.popoverPresentationController {
+                            popover.sourceView = aboutVC.view
+                            popover.sourceRect = CGRect(x: aboutVC.view.bounds.midX,
+                                                        y: aboutVC.view.bounds.midY,
+                                                        width: 1,
+                                                        height: 1)
+                        }
+                        aboutVC.present(activityController, animated: true)
+                    } label: {
+                        Label("Export controller diagnostics".localized, systemImage: "square.and.arrow.up")
+                    }
+                    .font(.footnote.weight(.semibold))
+                    .padding(.top, 4)
+
+                    Text("Controller diagnostics stay on this device until you export them.".localized)
+                        .font(.caption2)
+                        .foregroundColor(.gray)
+                        .multilineTextAlignment(.center)
+#endif
                     
                     HStack(spacing: 15) {
                         if #available(iOS 15.0, *) {

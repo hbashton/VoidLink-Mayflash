@@ -546,6 +546,10 @@ final class ControllerNavigator: NSObject {
     }
     
     private static func performRadialMenuAction(_ item: RadialMenuItem) {
+        ControllerDiagnostics.recordEvent("radial_menu_action_selected", fields: [
+            "item": String(describing: item),
+            "menu_state": String(describing: radialMenuState)
+        ])
         radialMenuDelegate?.controllerNavigatorDidSelect(item:item)
         switch item {
         case .gameProfiles, .addHost, .aboutView:
@@ -630,6 +634,11 @@ final class ControllerNavigator: NSObject {
     }
 
     private static func dismissRadialMenu(resetState: Bool = true) {
+        ControllerDiagnostics.recordEvent("radial_menu_dismissed", fields: [
+            "reset_state": resetState,
+            "menu_was_visible": radialMenuView != nil,
+            "menu_state": String(describing: radialMenuState)
+        ])
         radialMenuView?.dismiss()
         radialMenuView = nil
         if resetState {
@@ -770,6 +779,12 @@ final class ControllerNavigator: NSObject {
         if mainFrameVC.isStreaming() {
             radialMenuButton = .start
         }
+        ControllerDiagnostics.recordEvent("radial_menu_button_change", fields: [
+            "pressed": pressed,
+            "button": String(describing: radialMenuButton),
+            "streaming": mainFrameVC.isStreaming(),
+            "streaming_settings_open": mainFrameVC.settingsExpandedInStreamView
+        ])
         GamepadNavigationIllustrationHud.updateActionState(for: radialMenuButton, isInAction: pressed)
         if pressed {
             radialMenuPressDownTimestamp = CACurrentMediaTime()
