@@ -1166,7 +1166,9 @@ import UIKit
         controller: GCController,
         swapABXY: Bool,
         handler: @escaping (_ elementDict: NSDictionary,
-                            _ profile: GCPhysicalInputProfile) -> Void
+                            _ profile: GCPhysicalInputProfile,
+                            _ changedElement: GCControllerElement,
+                            _ changedElementName: NSString?) -> Void
     ) {
         let profile = controller.physicalInputProfile
         let mapping = buildPhysicalMapping(for: profile, swapABXY: swapABXY)
@@ -1178,6 +1180,13 @@ import UIKit
             guard let name = elementNamesByIdentity[ObjectIdentifier(physicalElement)] else { return nil }
             return (logicalElement, name)
         }
+        var liveElementMap: [NSNumber: GCControllerElement] = [:]
+        for (logicalElement, name) in logicalElementNames {
+            if let input = profile.elements[name] {
+                liveElementMap[NSNumber(value: logicalElement.rawValue)] = input
+            }
+        }
+        let liveElementDictionary = liveElementMap as NSDictionary
 
         if controller === primaryGCController {
             primaryControllerElementMap = mapping
@@ -1198,20 +1207,13 @@ import UIKit
 
         // Keep profile callbacks on main with the connection and disconnection observers.
         controller.handlerQueue = DispatchQueue.main
-        profile.valueDidChangeHandler = { [weak controller] changedProfile, _ in
-            guard let controller else { return }
-            let liveProfile = controller.physicalInputProfile
-            var currentElementMap: [NSNumber: GCControllerElement] = [:]
-            for (logicalElement, name) in logicalElementNames {
-                if let input = liveProfile.elements[name] {
-                    currentElementMap[NSNumber(value: logicalElement.rawValue)] = input
-                }
-            }
-            // Resolve the stable logical mapping against the live profile. Rebuilding
-            // it from a captured Mayflash HID profile produced an empty map even
-            // though the live profile exposed the buttons and axes. The Objective-C
-            // handler copies values to scalars before dispatching to its worker.
-            handler(currentElementMap as NSDictionary, liveProfile)
+        profile.valueDidChangeHandler = { [weak controller, weak profile] changedProfile, changedElement in
+            guard let controller, let liveProfile = profile else { return }
+            // Keep the element map tied to the live profile objects used by this
+            // callback. Rebuilding dictionaries on every HID value change adds
+            // avoidable work to the input hot path.
+            let changedName = elementNamesByIdentity[ObjectIdentifier(changedElement)]
+            handler(liveElementDictionary, liveProfile, changedElement, changedName as NSString?)
             if controller.playerIndex == .index1 {
                 GamepadOverlayStateCenter.shared.publish(
                     snapshot: GamepadOverlaySnapshot(profile: changedProfile.capture())
@@ -1616,6 +1618,7 @@ import UIKit
         // ControllerSupport installs its stream callbacks (including when the
         // same pad remains primary after connection).
         stopListeningPrimaryController(stopListenToRadialMenuButton: true)
+        ControllerNavigator.prepareForStreamingControllerInput()
         ControllerDiagnostics.recordEvent("controller_navigation_listeners_cleared_for_stream", fields: [
             "previous_menu_button_raw": previousRadialMenuButton.rawValue,
             "primary_vendor": preStreamingPrimaryGCController?.vendorName ?? "unknown"
@@ -1694,6 +1697,12 @@ import UIKit
         primaryControllerAxisStates.removeAll()
         primaryGCController?.extendedGamepad?.valueChangedHandler = nil
         // ControllerSupport owns physicalInputProfile.valueDidChangeHandler for streaming.
+    }
+
+    @objc static func stopListeningPrimaryControllerButton(_ button: ControllerElement) {
+        guard let input = primaryControllerElementMap?[button] as? GCControllerButtonInput else { return }
+        input.pressedChangedHandler = nil
+        input.valueChangedHandler = nil
     }
     
     @objc static func listenPrimaryControllerButton(_ button: ControllerElement, ignoreSwapABXY: Bool = true, handler: @escaping (_ pressed: Bool) -> Void){

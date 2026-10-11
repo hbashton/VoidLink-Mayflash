@@ -749,17 +749,45 @@ final class ControllerNavigator: NSObject {
         guard enabled else {return}
         guard let mainFrameVC = radialMenuDelegate as? MainFrameViewController else {return}
         radialMenuState = .main
+        let previousMenuButton = radialMenuButton
+        let isStreaming = mainFrameVC.isStreaming()
         // The radial-menu control is deliberately different in and out of a
         // stream: Start is intercepted for the P1 menu while streaming, and RT
         // opens the local menu when the client is browsing the app.
-        radialMenuButton = mainFrameVC.isStreaming() ? .start : .rightTrigger
+        radialMenuButton = isStreaming ? .start : .rightTrigger
         // During a stream, ControllerSupport routes this input from the actual
         // Sunshine P1 pad. The fixed app-primary listener may belong to another pad.
-        if mainFrameVC.isStreaming() { return }
+        if isStreaming {
+            // This method can run again after streaming begins. Remove the old
+            // local RT handler before returning so it cannot open the menu in
+            // parallel with the P1 Start path.
+            ControllerUtil.stopListeningPrimaryControllerButton(previousMenuButton)
+            prepareForStreamingControllerInput()
+            ControllerDiagnostics.recordEvent("radial_menu_local_listener_removed_for_stream", fields: [
+                "previous_button_raw": previousMenuButton.rawValue,
+                "streaming_button_raw": ControllerElement.start.rawValue
+            ])
+            return
+        }
         let sourceButton = radialMenuButton
         ControllerUtil.listenPrimaryControllerButton(sourceButton) { pressed in
             handleRadialMenuButtonChange(pressed, mainFrameVC: mainFrameVC, sourceButton: sourceButton)
         }
+    }
+
+    @objc static func prepareForStreamingControllerInput() {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async {
+                prepareForStreamingControllerInput()
+            }
+            return
+        }
+        radialMenuDelayTimer?.clean()
+        radialMenuState = .main
+        radialMenuButtonPressed = false
+        radialMenuPressDownTimestamp = 0
+        stickReleasedInRadialMenu = false
+        radialMenuButton = .start
     }
 
     @objc static func handleStreamingRadialMenuButton(_ pressed: Bool) {
