@@ -34,6 +34,7 @@ static __weak ControllerSupport *VLSharedControllerSupport = nil;
 - (void) updateGyroSwitchForController:(VoidController*)controller buttonFlag:(int)buttonFlag pressed:(BOOL)pressed;
 - (void) resetGyroSwitchForPlayerIndex:(NSInteger)playerIndex;
 - (void) releaseControllerTouchpadContacts:(VoidController*)controller;
+- (void) handleControllerTouchpad:(VoidController*)controller x:(float)x y:(float)y active:(BOOL)isActive index:(int)index;
 - (BOOL) reportControllerArrivalLocked:(VoidController*)voidController;
 
 @end
@@ -79,6 +80,7 @@ static __weak ControllerSupport *VLSharedControllerSupport = nil;
     
     bool _oscEnabled;
     char _controllerNumbers;
+    char _reservedControllerNumbers;
     bool _multiController;
     bool _swapABXYButtons;
     int _gyroMode;
@@ -1068,6 +1070,18 @@ static __weak ControllerSupport *VLSharedControllerSupport = nil;
     if (voidController.reportedArrival) {
         return YES;
     }
+
+    if (voidController.waitsForInputBeforeArrival) {
+        @synchronized (voidController) {
+            if (!voidController.hasReceivedInput) {
+                return NO;
+            }
+        }
+
+        // Generic adapter endpoints are reserved in physical port order, but
+        // only become active in the host mask after that port sends real input.
+        _controllerNumbers |= (1 << voidController.playerIndex);
+    }
     
     /*
     for(OnScreenWidgetView* widget in OnScreenWidgetView.mapping.allValues) {
@@ -1324,6 +1338,9 @@ static __weak ControllerSupport *VLSharedControllerSupport = nil;
                                      type,
                                      supportedButtonFlags,
                                      capabilities) != 0) {
+        if (voidController.waitsForInputBeforeArrival) {
+            _controllerNumbers &= ~(1 << voidController.playerIndex);
+        }
         return NO;
     }
     
@@ -1332,15 +1349,24 @@ static __weak ControllerSupport *VLSharedControllerSupport = nil;
     
     // Remember that we've reported arrival already
     voidController.reportedArrival = YES;
+    if (voidController.waitsForInputBeforeArrival) {
+        _reservedControllerNumbers &= ~(1 << voidController.playerIndex);
+    }
     return YES;
 }
 
 -(void) handleControllerTouchpad:(VoidController*)controller touch:(GCControllerDirectionPad*)touch index:(int)index
 {
+    [self handleControllerTouchpad:controller
+                                  x:touch.xAxis.value
+                                  y:touch.yAxis.value
+                            active:(touch.xAxis.value != 0 || touch.yAxis.value != 0)
+                             index:index];
+}
+
+-(void) handleControllerTouchpad:(VoidController*)controller x:(float)x y:(float)y active:(BOOL)isActive index:(int)index
+{
     controller_touch_context_t context = index == 0 ? controller.primaryTouch : controller.secondaryTouch;
-    float x = touch.xAxis.value;
-    float y = touch.yAxis.value;
-    BOOL isActive = x != 0 || y != 0;
     
     // This magic is courtesy of SDL
     float normalizedX = (1.0f + x) * 0.5f;
@@ -1368,40 +1394,6 @@ static __weak ControllerSupport *VLSharedControllerSupport = nil;
     }
     else {
         controller.secondaryTouch = (controller_touch_context_t) { x, y, isActive };
-    }
-}
-
--(void) handleControllerTouchpad:(VoidController*)controller touchpad:(GCControllerTouchpad*)touchpad index:(int)index API_AVAILABLE(ios(16.0), tvos(16.0))
-{
-    controller_touch_context_t context = index == 0 ? controller.primaryTouch : controller.secondaryTouch;
-    GCControllerDirectionPad *touchSurface = touchpad.touchSurface;
-    float x = touchSurface.xAxis.value;
-    float y = touchSurface.yAxis.value;
-    BOOL isActive = touchpad.touchState != GCTouchStateUp;
-
-    // A finger can be touching at the exact center (0,0). Use Game Controller's
-    // touch state to distinguish that from a released finger.
-    float normalizedX = (1.0f + x) * 0.5f;
-    float normalizedY = 1.0f - (1.0f + y) * 0.5f;
-
-    if (context.isActive && !isActive) {
-        LiSendControllerTouchEvent(controller.playerIndex, LI_TOUCH_EVENT_UP, index, normalizedX, normalizedY, 1.0f);
-    }
-    else if (isActive) {
-        if (!context.isActive) {
-            LiSendControllerTouchEvent(controller.playerIndex, LI_TOUCH_EVENT_DOWN, index, normalizedX, normalizedY, 1.0f);
-        }
-        else if (context.lastX != x || context.lastY != y) {
-            LiSendControllerTouchEvent(controller.playerIndex, LI_TOUCH_EVENT_MOVE, index, normalizedX, normalizedY, 1.0f);
-        }
-    }
-
-    controller_touch_context_t newContext = { x, y, isActive };
-    if (index == 0) {
-        controller.primaryTouch = newContext;
-    }
-    else {
-        controller.secondaryTouch = newContext;
     }
 }
 
@@ -1711,6 +1703,70 @@ double rc_expo(double x, double expo) {
         VoidController *voidController = [self->_voidControllers objectForKey:@(controller.playerIndex)];
         if (voidController == nil || voidController.gamepad != controller) return;
 
+        // Game Controller callbacks run on the controller's handler queue. Copy
+        // all values here so the input worker never reads live GameController
+        // elements or profiles from a different queue.
+        NSMutableDictionary<NSNumber *, NSNumber *> *capturedButtonStates = [NSMutableDictionary dictionary];
+        BOOL hasPressedButton = NO;
+        for (NSNumber *elementFlagId in elementDict) {
+            GCControllerElement *mappedElement = elementDict[elementFlagId];
+            if (![mappedElement isKindOfClass:[GCControllerButtonInput class]]) continue;
+
+            BOOL pressed = ((GCControllerButtonInput *)mappedElement).pressed;
+            capturedButtonStates[elementFlagId] = @(pressed);
+            hasPressedButton |= pressed;
+        }
+
+        GCControllerDirectionPad *leftStick = profile.dpads[GCInputLeftThumbstick];
+        GCControllerDirectionPad *rightStick = profile.dpads[GCInputRightThumbstick];
+        CGFloat leftX = leftStick ? leftStick.xAxis.value : 0;
+        CGFloat leftY = leftStick ? leftStick.yAxis.value : 0;
+        CGFloat rightX = rightStick ? rightStick.xAxis.value : 0;
+        CGFloat rightY = rightStick ? rightStick.yAxis.value : 0;
+        unsigned char leftTrigger = (unsigned char)(profile.buttons[GCInputLeftTrigger].value * 0xFF);
+        unsigned char rightTrigger = (unsigned char)(profile.buttons[GCInputRightTrigger].value * 0xFF);
+
+        float primaryTouchX = 0;
+        float primaryTouchY = 0;
+        BOOL primaryTouchActive = NO;
+        GCControllerTouchpad *primaryTouchpad = profile.touchpads[GCInputDualShockTouchpadOne];
+        if (primaryTouchpad != nil) {
+            GCControllerDirectionPad *touchSurface = primaryTouchpad.touchSurface;
+            primaryTouchX = touchSurface.xAxis.value;
+            primaryTouchY = touchSurface.yAxis.value;
+            primaryTouchActive = primaryTouchpad.touchState != GCTouchStateUp;
+        }
+        else if (profile.dpads[GCInputDualShockTouchpadOne] != nil) {
+            GCControllerDirectionPad *touch = profile.dpads[GCInputDualShockTouchpadOne];
+            primaryTouchX = touch.xAxis.value;
+            primaryTouchY = touch.yAxis.value;
+            primaryTouchActive = primaryTouchX != 0 || primaryTouchY != 0;
+        }
+
+        float secondaryTouchX = 0;
+        float secondaryTouchY = 0;
+        BOOL secondaryTouchActive = NO;
+        GCControllerTouchpad *secondaryTouchpad = profile.touchpads[GCInputDualShockTouchpadTwo];
+        if (secondaryTouchpad != nil) {
+            GCControllerDirectionPad *touchSurface = secondaryTouchpad.touchSurface;
+            secondaryTouchX = touchSurface.xAxis.value;
+            secondaryTouchY = touchSurface.yAxis.value;
+            secondaryTouchActive = secondaryTouchpad.touchState != GCTouchStateUp;
+        }
+        else if (profile.dpads[GCInputDualShockTouchpadTwo] != nil) {
+            GCControllerDirectionPad *touch = profile.dpads[GCInputDualShockTouchpadTwo];
+            secondaryTouchX = touch.xAxis.value;
+            secondaryTouchY = touch.yAxis.value;
+            secondaryTouchActive = secondaryTouchX != 0 || secondaryTouchY != 0;
+        }
+
+        BOOL hasMeaningfulInput = hasPressedButton
+            || fabs(leftX) >= 0.15 || fabs(leftY) >= 0.15
+            || fabs(rightX) >= 0.15 || fabs(rightY) >= 0.15
+            || leftTrigger >= 13 || rightTrigger >= 13
+            || primaryTouchActive || secondaryTouchActive;
+        NSDictionary<NSNumber *, NSNumber *> *buttonStates = [capturedButtonStates copy];
+
         int radialMenuButton = ControllerElementNull;
         BOOL controllerNavigatorEnabled = NO;
         if (@available(iOS 13.0, tvOS 13.0, *)) {
@@ -1720,13 +1776,16 @@ double rc_expo(double x, double expo) {
         BOOL isPrimaryController = controller == ControllerUtil.primaryGCController;
 
         dispatch_async(self->_genericControllerInputQueue, ^{
-            for (NSNumber *elementFlagId in elementDict) {
-                GCControllerElement *mappedElement = elementDict[elementFlagId];
-                if (![mappedElement isKindOfClass:[GCControllerButtonInput class]]) continue;
+            if (hasMeaningfulInput) {
+                @synchronized (voidController) {
+                    voidController.hasReceivedInput = YES;
+                }
+            }
 
-                GCControllerButtonInput *button = (GCControllerButtonInput *)mappedElement;
+            for (NSNumber *elementFlagId in buttonStates) {
+                BOOL pressed = buttonStates[elementFlagId].boolValue;
                 int buttonFlag = elementFlagId.intValue;
-                [self updateGyroSwitchForController:voidController buttonFlag:buttonFlag pressed:button.pressed];
+                [self updateGyroSwitchForController:voidController buttonFlag:buttonFlag pressed:pressed];
 
                 // Trigger values travel in the dedicated analog trigger fields below;
                 // their ControllerElement IDs are not Moonlight button flags.
@@ -1734,23 +1793,18 @@ double rc_expo(double x, double expo) {
                     buttonFlag == ControllerElementRightTrigger;
                 if (!isTrigger &&
                     (!isPrimaryController || buttonFlag != radialMenuButton || !controllerNavigatorEnabled)) {
-                    UPDATE_BUTTON_FLAG(voidController, buttonFlag, button.pressed);
+                    UPDATE_BUTTON_FLAG(voidController, buttonFlag, pressed);
                 }
             }
 
-            GCControllerDirectionPad *leftStick = profile.dpads[GCInputLeftThumbstick];
-            GCControllerDirectionPad *rightStick = profile.dpads[GCInputRightThumbstick];
-            CGFloat leftX = leftStick ? leftStick.xAxis.value * self->stickMaxOffset : 0;
-            CGFloat leftY = leftStick ? leftStick.yAxis.value * self->stickMaxOffset : 0;
-            CGFloat rightX = rightStick ? rightStick.xAxis.value * self->stickMaxOffset : 0;
-            CGFloat rightY = rightStick ? rightStick.yAxis.value * self->stickMaxOffset : 0;
-
-            CGVector leftOffset = [ControllerUtil compensatedWithOffsetVector:CGVectorMake(leftX, leftY)
+            CGVector leftOffset = [ControllerUtil compensatedWithOffsetVector:CGVectorMake(leftX * self->stickMaxOffset,
+                                                                                             leftY * self->stickMaxOffset)
                                                                      minOffset:self->_leftStickMinOffset
                                                                       circulate:false];
-            CGVector rightOffset = [ControllerUtil compensatedWithOffsetVector:CGVectorMake(rightX, rightY)
-                                                                      minOffset:self->_rightStickMinOffset
-                                                                       circulate:false];
+            CGVector rightOffset = [ControllerUtil compensatedWithOffsetVector:CGVectorMake(rightX * self->stickMaxOffset,
+                                                                                              rightY * self->stickMaxOffset)
+                                                                       minOffset:self->_rightStickMinOffset
+                                                                        circulate:false];
             short leftStickX = (short)leftOffset.dx;
             short leftStickY = (short)leftOffset.dy;
             short rightStickX = (short)rightOffset.dx;
@@ -1784,25 +1838,15 @@ double rc_expo(double x, double expo) {
                                     y:leftStickY];
             }
 
-            unsigned char leftTrigger = (unsigned char)(profile.buttons[GCInputLeftTrigger].value * 0xFF);
-            unsigned char rightTrigger = (unsigned char)(profile.buttons[GCInputRightTrigger].value * 0xFF);
             [self updateTriggers:voidController left:leftTrigger right:rightTrigger];
             [self updateFinished:voidController];
 
-            GCControllerTouchpad *primaryTouchpad = profile.touchpads[GCInputDualShockTouchpadOne];
-            if (primaryTouchpad != nil) {
-                [self handleControllerTouchpad:voidController touchpad:primaryTouchpad index:0];
-            }
-            else if (profile.dpads[GCInputDualShockTouchpadOne] != nil) {
-                [self handleControllerTouchpad:voidController touch:profile.dpads[GCInputDualShockTouchpadOne] index:0];
-            }
-            GCControllerTouchpad *secondaryTouchpad = profile.touchpads[GCInputDualShockTouchpadTwo];
-            if (secondaryTouchpad != nil) {
-                [self handleControllerTouchpad:voidController touchpad:secondaryTouchpad index:1];
-            }
-            else if (profile.dpads[GCInputDualShockTouchpadTwo] != nil) {
-                [self handleControllerTouchpad:voidController touch:profile.dpads[GCInputDualShockTouchpadTwo] index:1];
-            }
+            [self handleControllerTouchpad:voidController
+                                          x:primaryTouchX y:primaryTouchY
+                                     active:primaryTouchActive index:0];
+            [self handleControllerTouchpad:voidController
+                                          x:secondaryTouchX y:secondaryTouchY
+                                     active:secondaryTouchActive index:1];
         });
     }];
 }
@@ -2064,6 +2108,7 @@ double rc_expo(double x, double expo) {
     voidController.motionTypes = [[NSMutableSet alloc] init];
     voidController.supportedEmulationFlags = EMULATING_SPECIAL | EMULATING_SELECT;
     voidController.gamepad = controller;
+    voidController.waitsForInputBeforeArrival = controller.extendedGamepad == nil;
 #if !TARGET_OS_TV
     if ([GameSirG8MFiRumbler isTargetController:controller]) {
         voidController.hardware = ControllerHardwareG8PlusMFi;
@@ -2153,8 +2198,15 @@ double rc_expo(double x, double expo) {
     int startPlayIndex = _streamConfig.emulatedControllerType == LI_CTYPE_UNKNOWN ? 1 : 0;
     
     for (int i = startPlayIndex; i < 4; i++) {
-        if (!(_controllerNumbers & (1 << i))) {
-            _controllerNumbers |= (1 << i);
+        int slotBit = (1 << i);
+        if (!((_controllerNumbers | _reservedControllerNumbers) & slotBit)) {
+            BOOL waitsForInput = controller.extendedGamepad == nil;
+            if (waitsForInput) {
+                _reservedControllerNumbers |= slotBit;
+            }
+            else {
+                _controllerNumbers |= slotBit;
+            }
             
             VoidController* voidController = [[VoidController alloc] init];
 
@@ -2218,10 +2270,16 @@ double rc_expo(double x, double expo) {
     int mask = 0;
     
     if (streamConfig.multiController) {
-        int i = 0;
+        // Keep the startup mask aligned with assignController's slot order.
+        // Generic-profile adapters can expose empty endpoints, so reserve their
+        // positions but don't advertise them to Sunshine until they send input.
+        int playerIndex = streamConfig.emulatedControllerType == LI_CTYPE_UNKNOWN ? 1 : 0;
         for (GCController* controller in [GCController controllers]) {
             if ([ControllerSupport isSupportedGamepad:controller]) {
-                mask |= 1 << i++;
+                if (controller.extendedGamepad != nil && playerIndex < 4) {
+                    mask |= 1 << playerIndex;
+                }
+                playerIndex++;
             }
         }
     }
@@ -2372,6 +2430,7 @@ double rc_expo(double x, double expo) {
     _voidControllers = [[NSMutableDictionary alloc] init];
     [ControllerUtil.activeStreamingGCControllers removeAllObjects];
     _controllerNumbers = 0;
+    _reservedControllerNumbers = 0;
 #if !TARGET_OS_TV
     _gameSirG8MFiRumbler = [[GameSirG8MFiRumbler alloc] init];
     _kishiRumbler = [[KishiV3ProXLRumbler alloc] init];
@@ -2460,6 +2519,7 @@ double rc_expo(double x, double expo) {
             [ControllerUtil.activeStreamingGCControllers removeObject:controller];
             [self->_controllerStreamLock lock];
             self->_controllerNumbers &= ~(1 << controller.playerIndex);
+            self->_reservedControllerNumbers &= ~(1 << controller.playerIndex);
             [self->_controllerStreamLock unlock];
         }
         Log(LOG_I, @"Unassigning controller index: %ld", (long)controller.playerIndex);
@@ -2490,6 +2550,11 @@ double rc_expo(double x, double expo) {
             }
             
             // Inform the server of the updated active gamepads before removing this controller
+            if (!voidController.reportedArrival) {
+                @synchronized (voidController) {
+                    voidController.hasReceivedInput = NO;
+                }
+            }
             [self updateFinished:voidController];
             
             // Re-evaluate the on-screen control mode
@@ -2720,6 +2785,7 @@ double rc_expo(double x, double expo) {
     
     [_controllerStreamLock lock];
     _controllerNumbers = 0;
+    _reservedControllerNumbers = 0;
     [_controllerStreamLock unlock];
     
     [self stopTimerForController:_oscController];
