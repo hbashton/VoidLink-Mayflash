@@ -2251,6 +2251,9 @@ double rc_expo(double x, double expo) {
                             if (stillPrimary) [ControllerNavigator handleStreamingRadialMenuButton:pressed];
                         });
                     }
+                    // Start opens the radial menu, but it is also a real gamepad
+                    // button and must remain visible to the streaming host.
+                    UPDATE_BUTTON_FLAG(voidController, buttonFlag, pressed);
                 }
                 else if (!isTrigger) {
                     UPDATE_BUTTON_FLAG(voidController, buttonFlag, pressed);
@@ -2477,6 +2480,9 @@ double rc_expo(double x, double expo) {
                             if (stillPrimary) [ControllerNavigator handleStreamingRadialMenuButton:pressed];
                         });
                     }
+                    // Start opens the radial menu, but it is also a real gamepad
+                    // button and must remain visible to the streaming host.
+                    UPDATE_BUTTON_FLAG(voidController, buttonFlag, pressed);
                 }
                 else if (!isTrigger) {
                     UPDATE_BUTTON_FLAG(voidController, buttonFlag, pressed);
