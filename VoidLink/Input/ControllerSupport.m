@@ -258,7 +258,27 @@ static __weak ControllerSupport *VLSharedControllerSupport = nil;
         return;
     }
 
-    if (voidController == nil || voidController.reportRateHz == 0) {
+    if (voidController == nil) {
+        [self stopTimerForController:voidController];
+        return;
+    }
+
+    if (voidController.gamepad != nil &&
+        (!voidController.reportedArrival || voidController.streamPlayerIndex < 0)) {
+        [voidController.accelTimer invalidate];
+        voidController.accelTimer = nil;
+        [voidController.gyroTimer invalidate];
+        voidController.gyroTimer = nil;
+#if !TARGET_OS_TV
+        [voidController.motionManager stopDeviceMotionUpdates];
+#endif
+        if (@available(iOS 14.0, tvOS 14.0, *)) {
+            voidController.gamepad.motion.sensorsActive = NO;
+        }
+        return;
+    }
+
+    if (voidController.reportRateHz == 0) {
         [self stopTimerForController:voidController];
         return;
     }
@@ -1511,6 +1531,10 @@ static __weak ControllerSupport *VLSharedControllerSupport = nil;
         voidController.gamepad.vendorName ?: @"controller",
         voidController.streamPlayerIndex + 1);
     [self initializeControllerBattery:voidController];
+    [self updateTimerStateForController:voidController];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self->_delegate gamepadPresenceChanged];
+    });
     return YES;
 }
 
