@@ -1200,21 +1200,21 @@ import UIKit
         controller.handlerQueue = DispatchQueue.main
         profile.valueDidChangeHandler = { [weak controller] changedProfile, _ in
             guard let controller else { return }
-            let snapshot = changedProfile.capture()
             let liveProfile = controller.physicalInputProfile
             var currentElementMap: [NSNumber: GCControllerElement] = [:]
             for (logicalElement, name) in logicalElementNames {
-                if let input = snapshot.elements[name] ?? liveProfile.elements[name] {
+                if let input = liveProfile.elements[name] {
                     currentElementMap[NSNumber(value: logicalElement.rawValue)] = input
                 }
             }
-            // Resolve the stable logical mapping by profile element name. Rebuilding
-            // the whole logical map from a captured Mayflash HID profile produced an
-            // empty map even though the live profile exposed the buttons and axes.
-            handler(currentElementMap as NSDictionary, snapshot)
+            // Resolve the stable logical mapping against the live profile. Rebuilding
+            // it from a captured Mayflash HID profile produced an empty map even
+            // though the live profile exposed the buttons and axes. The Objective-C
+            // handler copies values to scalars before dispatching to its worker.
+            handler(currentElementMap as NSDictionary, liveProfile)
             if controller.playerIndex == .index1 {
                 GamepadOverlayStateCenter.shared.publish(
-                    snapshot: GamepadOverlaySnapshot(profile: snapshot)
+                    snapshot: GamepadOverlaySnapshot(profile: changedProfile.capture())
                 )
             }
         }
