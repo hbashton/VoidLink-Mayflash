@@ -256,6 +256,7 @@ private let settingsLegacyHelpByStackIdentifier: [String: SettingsLegacyHelpCont
 
     // Controller
     "controllerNavigationStack": .init(messageKey: "controllerNavigationStackTip", learnMoreURLKey: nil),
+    "controllerTriggerDeadzoneStack": .init(messageKey: "controllerTriggerDeadzoneStackTip", learnMoreURLKey: nil),
     "controllerMouseExpoStack": .init(messageKey: "controllerMouseExpoStackTip", learnMoreURLKey: nil),
     "emulatedControllerTypeStack": .init(messageKey: "emulatedControllerTypeStackTip", learnMoreURLKey: "emulatedControllerTypeStackDoc"),
 
@@ -339,6 +340,7 @@ enum SettingsItemID: String, Hashable, Identifiable {
 
     case controllerNavigation = "controllerNavigationStack"
     case streamingRadialMenuDelay = "streamingRadialMenuDelayStack"
+    case controllerTriggerDeadzone = "controllerTriggerDeadzoneStack"
     case controllerMouseVelocity = "controllerMouseVelocityStack"
     case controllerMouseExpo = "controllerMouseExpoStack"
     case swapABXY = "swapAbaxyStack"
@@ -462,6 +464,7 @@ enum SettingsItemID: String, Hashable, Identifiable {
         case .trackTouchPoint: return "Touch Point Tracking"
         case .controllerNavigation: return "Controller Navigation"
         case .streamingRadialMenuDelay: return "Streaming Radial Menu Delay"
+        case .controllerTriggerDeadzone: return "Analog Trigger Deadzone"
         case .controllerMouseVelocity: return "Controller Mouse Velocity"
         case .controllerMouseExpo: return "Curve Exponent"
         case .swapABXY: return "Swap A/B X/Y Buttons"
@@ -1231,6 +1234,7 @@ final class SettingsItemRegistry: ObservableObject {
     
     let controllerNavigation = SettingsItemModel<Bool>(id: .controllerNavigation, value: false)
     let streamingRadialMenuDelay = SettingsItemModel<Double>(id: .streamingRadialMenuDelay, value: 0)
+    let controllerTriggerDeadzone = SettingsItemModel<Double>(id: .controllerTriggerDeadzone, value: 20)
     let controllerMouseVelocity = SettingsItemModel<Double>(id: .controllerMouseVelocity, value: 0)
     let controllerMouseExpo = SettingsItemModel<Double>(id: .controllerMouseExpo, value: 1)
     let swapABXY = SettingsItemModel<Bool>(id: .swapABXY, value: false)
@@ -1360,6 +1364,7 @@ final class SettingsItemRegistry: ObservableObject {
             // Controller
             controllerNavigation.objectWillChange,
             streamingRadialMenuDelay.objectWillChange,
+            controllerTriggerDeadzone.objectWillChange,
             controllerMouseVelocity.objectWillChange,
             controllerMouseExpo.objectWillChange,
             swapABXY.objectWillChange,
@@ -1454,10 +1459,6 @@ final class SettingsItemRegistry: ObservableObject {
 @available(iOS 13.0, tvOS 13.0, *)
 private final class ControllerNavigationSetupCoordinator {
     private enum Phase {
-        case localRadialButton
-        case localRadialButtonSide
-        case streamingRadialButton
-        case streamingRadialButtonSide
         case mouseStick
         case mouseLeftButton
         case mouseRightButton
@@ -1468,7 +1469,7 @@ private final class ControllerNavigationSetupCoordinator {
     private weak var controller: GCController?
     private let completion: (Bool) -> Void
     private let dataManager = DataManager()
-    private var phase: Phase = .localRadialButton
+    private var phase: Phase = .mouseStick
     private var capturedButtons = Set<Int32>()
     private var previouslyPressedButtons = Set<Int32>()
     private var alertController: UIAlertController?
@@ -1489,13 +1490,13 @@ private final class ControllerNavigationSetupCoordinator {
             return
         }
         self.controller = controller
-        phase = .localRadialButton
+        phase = .mouseStick
         capturedButtons.removeAll()
         previouslyPressedButtons.removeAll()
 
         let alert = UIAlertController(
             title: "Controller Navigation".localized,
-            message: "radialMenuButtonTip".localized,
+            message: "controllerNavigationTip".localized + "\n\n" + mouseStickMessage,
             preferredStyle: .alert
         )
         alertController = alert
@@ -1554,55 +1555,6 @@ private final class ControllerNavigationSetupCoordinator {
         previouslyPressedButtons = pressedButtons
 
         switch phase {
-        case .localRadialButton:
-            guard let rawValue = newlyPressed.first(where: isRadialMenuButton) else { return }
-            settings.localRadialMenuButton = NSNumber(value: rawValue)
-            capturedButtons.insert(rawValue)
-            let position = controllerElementPosition(rawValue)
-            if position == .undefined || position == .middle {
-                phase = .localRadialButtonSide
-                updateMessage("Which side of the controller is this button on?".localized)
-                ControllerNavigator.updateHudForCustomRadialMenuButtonPosition()
-            } else {
-                phase = .streamingRadialButton
-                updateMessage("streamingRadialMenuButtonTip".localized)
-            }
-
-        case .localRadialButtonSide:
-            guard let position = selectedPosition(from: newlyPressed) else { return }
-            settings.customLocalRadialMenuButtonPosition = NSNumber(value: position.rawValue)
-            phase = .streamingRadialButton
-            GamepadNavigationIllustrationHud.clearHud()
-            updateMessage("streamingRadialMenuButtonTip".localized)
-
-        case .streamingRadialButton:
-            guard let rawValue = newlyPressed.first(where: isRadialMenuButton) else { return }
-            settings.streamingRadialMenuButton = NSNumber(value: rawValue)
-            capturedButtons.insert(rawValue)
-            let localRawValue = settings.localRadialMenuButton?.int32Value ?? ControllerElement.null.rawValue
-            if rawValue == localRawValue {
-                settings.customStreamingRadialMenuButtonPosition = settings.customLocalRadialMenuButtonPosition
-                phase = .mouseStick
-                updateMessage(mouseStickMessage)
-            } else {
-                let position = controllerElementPosition(rawValue)
-                if position == .undefined || position == .middle {
-                    phase = .streamingRadialButtonSide
-                    updateMessage("Which side of the controller is this button on?".localized)
-                    ControllerNavigator.updateHudForCustomRadialMenuButtonPosition()
-                } else {
-                    phase = .mouseStick
-                    updateMessage(mouseStickMessage)
-                }
-            }
-
-        case .streamingRadialButtonSide:
-            guard let position = selectedPosition(from: newlyPressed) else { return }
-            settings.customStreamingRadialMenuButtonPosition = NSNumber(value: position.rawValue)
-            phase = .mouseStick
-            GamepadNavigationIllustrationHud.clearHud()
-            updateMessage(mouseStickMessage)
-
         case .mouseStick:
             let leftOffset = hypotf(gamepad.leftThumbstick.xAxis.value, gamepad.leftThumbstick.yAxis.value)
             let rightOffset = hypotf(gamepad.rightThumbstick.xAxis.value, gamepad.rightThumbstick.yAxis.value)
@@ -1635,39 +1587,19 @@ private final class ControllerNavigationSetupCoordinator {
         "Move the stick you want to use for mouse control. The other stick will be used for vertical and horizontal scrolling".localized
     }
 
-    private func isRadialMenuButton(_ rawValue: Int32) -> Bool {
-        ControllerNavigator.radialMenuButtonPool.contains(NSNumber(value: rawValue))
-    }
-
-    private func controllerElementPosition(_ rawValue: Int32) -> ControllerElementPosition {
-        guard let element = ControllerElement(rawValue: rawValue) else { return .undefined }
-        return ControllerUtil.position(for: element)
-    }
-
-    private func selectedPosition(from newlyPressed: Set<Int32>) -> ControllerElementPosition? {
-        if newlyPressed.contains(ControllerElement.dpadLeft.rawValue) { return .left }
-        if newlyPressed.contains(ControllerElement.dpadRight.rawValue) { return .right }
-        if newlyPressed.contains(ControllerElement.dpadUp.rawValue) { return .middle }
-        return nil
-    }
-
     private func complete(using settings: Settings) {
         phase = .finished
-        guard let localButton = ControllerElement(rawValue: settings.localRadialMenuButton?.int32Value ?? ControllerElement.null.rawValue),
-              let streamingButton = ControllerElement(rawValue: settings.streamingRadialMenuButton?.int32Value ?? ControllerElement.null.rawValue) else {
-            cancel()
-            return
-        }
-        let localPosition = ControllerElementPosition(
-            rawValue: settings.customLocalRadialMenuButtonPosition?.intValue ?? ControllerElementPosition.undefined.rawValue
-        ) ?? .undefined
-        let streamingPosition = ControllerElementPosition(
-            rawValue: settings.customStreamingRadialMenuButtonPosition?.intValue ?? ControllerElementPosition.undefined.rawValue
-        ) ?? .undefined
+        let localButton = ControllerElement.rightTrigger
+        let streamingButton = ControllerElement.start
+        let rightSide = ControllerElementPosition.right
+        settings.localRadialMenuButton = NSNumber(value: localButton.rawValue)
+        settings.streamingRadialMenuButton = NSNumber(value: streamingButton.rawValue)
+        settings.customLocalRadialMenuButtonPosition = NSNumber(value: rightSide.rawValue)
+        settings.customStreamingRadialMenuButtonPosition = NSNumber(value: rightSide.rawValue)
         ControllerNavigator.localRadialMenuButton = localButton
-        ControllerNavigator.customPositionForLocalRadialMenuButton = localPosition
+        ControllerNavigator.customPositionForLocalRadialMenuButton = rightSide
         ControllerNavigator.streamingRadialMenuButton = streamingButton
-        ControllerNavigator.customPositionForStreamingRadialMenuButton = streamingPosition
+        ControllerNavigator.customPositionForStreamingRadialMenuButton = rightSide
         ControllerNavigator.streamingRadialMenuDelay = settings.streamingRadialMenuDelay?.doubleValue ?? 0
         ControllerNavigator.enabled = true
         if let settingsController = presenter as? SettingsViewController {
@@ -1890,6 +1822,7 @@ final class SettingsSession: NSObject, ObservableObject {
 
         itemRegistry.controllerNavigation.value = snapshot.enableControllerNavigation
         itemRegistry.streamingRadialMenuDelay.value = snapshot.streamingRadialMenuDelay.doubleValue
+        itemRegistry.controllerTriggerDeadzone.value = Double(ControllerUtil.controllerTriggerDeadzone * 100)
         itemRegistry.controllerMouseVelocity.value = snapshot.controllerMousePointerVelocity.doubleValue
         itemRegistry.controllerMouseExpo.value = snapshot.controllerMouseExpo.doubleValue
         itemRegistry.swapABXY.value = snapshot.swapABXYButtons
@@ -2767,6 +2700,19 @@ final class SettingsSession: NSObject, ObservableObject {
                 clampedTo: 0...3,
                 valueText: { _, model in String(format: "%.1f s", model.value) },
                 isVisible: { $0.itemRegistry.controllerNavigation.value }
+            ),
+            sliderItem(
+                \.controllerTriggerDeadzone,
+                range: 0...50,
+                clampedTo: 0...50,
+                valueText: { _, model in "\(Int(model.value.rounded()))%" },
+                hasInfo: true,
+                onValueChanged: { session in
+                    UserDefaults.standard.set(
+                        session.itemRegistry.controllerTriggerDeadzone.value / 100,
+                        forKey: ControllerUtil.triggerDeadzoneDefaultsKey
+                    )
+                }
             ),
             sliderItem(
                 \.controllerMouseVelocity,

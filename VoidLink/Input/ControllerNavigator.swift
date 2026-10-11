@@ -253,9 +253,9 @@ final class ControllerNavigator: NSObject {
         return uiNavigationDelegate?.getNavigationElements().contains { $0.control == control } ?? false
     }
     
-    @objc static var localRadialMenuButton: ControllerElement = .leftShoulder
+    @objc static var localRadialMenuButton: ControllerElement = .rightTrigger
     @objc static var customPositionForLocalRadialMenuButton: ControllerElementPosition = .left
-    @objc static var streamingRadialMenuButton: ControllerElement = .leftShoulder
+    @objc static var streamingRadialMenuButton: ControllerElement = .start
     @objc static var customPositionForStreamingRadialMenuButton: ControllerElementPosition = .left
     @objc static var streamingRadialMenuDelay: TimeInterval = 0
     
@@ -733,47 +733,73 @@ final class ControllerNavigator: NSObject {
         guard enabled else {return}
         guard let mainFrameVC = radialMenuDelegate as? MainFrameViewController else {return}
         radialMenuState = .main
-        radialMenuButton = mainFrameVC.isStreaming() ? streamingRadialMenuButton : localRadialMenuButton
+        // The radial-menu control is deliberately different in and out of a
+        // stream: Start is intercepted for the P1 menu while streaming, and RT
+        // opens the local menu when the client is browsing the app.
+        radialMenuButton = mainFrameVC.isStreaming() ? .start : .rightTrigger
+        // During a stream, ControllerSupport routes this input from the actual
+        // Sunshine P1 pad. The fixed app-primary listener may belong to another pad.
+        if mainFrameVC.isStreaming() { return }
         ControllerUtil.listenPrimaryControllerButton(radialMenuButton) { pressed in
-            GamepadNavigationIllustrationHud.updateActionState(for: radialMenuButton, isInAction: pressed)
-            if pressed {
-                radialMenuPressDownTimestamp = CACurrentMediaTime()
-                radialMenuDelayTimer?.clean()
-                radialMenuButtonPressed = true
-                let delayRadialMenu = (mainFrameVC.isStreaming() && !mainFrameVC.settingsExpandedInStreamView) || streamingRadialMenuDelay < 0.03
-                streamingRadialMenuDelay = max(streamingRadialMenuDelay, 0.032)
-                
-                if delayRadialMenu {
-                    radialMenuDelayTimer = SafeTimer(interval: streamingRadialMenuDelay) {
-                        if radialMenuDelayTimer?.remainingMinimumRunCount == 2 {return}
-                        if radialMenuButtonPressed {
-                            DispatchQueue.main.async {
-                                self.updateRadialMenu()
-                                radialMenuDelayTimer?.clean()
-                            }
+            handleRadialMenuButtonChange(pressed, mainFrameVC: mainFrameVC)
+        }
+    }
+
+    @objc static func handleStreamingRadialMenuButton(_ pressed: Bool) {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async {
+                handleStreamingRadialMenuButton(pressed)
+            }
+            return
+        }
+        guard let mainFrameVC = radialMenuDelegate as? MainFrameViewController,
+              mainFrameVC.isStreaming() else { return }
+        handleRadialMenuButtonChange(pressed, mainFrameVC: mainFrameVC)
+    }
+
+    private static func handleRadialMenuButtonChange(_ pressed: Bool, mainFrameVC: MainFrameViewController) {
+        GamepadNavigationIllustrationHud.updateActionState(for: radialMenuButton, isInAction: pressed)
+        if pressed {
+            radialMenuPressDownTimestamp = CACurrentMediaTime()
+            radialMenuDelayTimer?.clean()
+            radialMenuButtonPressed = true
+            let delayRadialMenu = (mainFrameVC.isStreaming() && !mainFrameVC.settingsExpandedInStreamView) || streamingRadialMenuDelay < 0.03
+            streamingRadialMenuDelay = max(streamingRadialMenuDelay, 0.032)
+
+            if delayRadialMenu {
+                radialMenuDelayTimer = SafeTimer(interval: streamingRadialMenuDelay) {
+                    if radialMenuDelayTimer?.remainingMinimumRunCount == 2 {return}
+                    if radialMenuButtonPressed {
+                        DispatchQueue.main.async {
+                            self.updateRadialMenu()
+                            radialMenuDelayTimer?.clean()
                         }
                     }
-                    radialMenuDelayTimer?.restart(minimumRunCount: 2)
                 }
-                else {
-                    self.updateRadialMenu()
-                }
+                radialMenuDelayTimer?.restart(minimumRunCount: 2)
             }
             else {
-                guard CACurrentMediaTime() - radialMenuPressDownTimestamp > 0.035 else {
-                    return
-                }
+                updateRadialMenu()
+            }
+        }
+        else {
+            let pressDuration = CACurrentMediaTime() - radialMenuPressDownTimestamp
+            guard pressDuration > 0.035 else {
+                // A short tap should not leave the delayed hold action armed.
                 radialMenuButtonPressed = false
                 radialMenuDelayTimer?.clean()
-                stickReleasedInRadialMenu = false
-                if radialMenuView == nil, let vc = uiNavigationDelegate as? StreamFrameViewController, vc.hasNoPresentedVC {
-                    ControllerSupport.sharedInstance()?.sendNavigationButtonPress()
-                    return
-                }
-                radialMenuView?.dismiss()
-                radialMenuView = nil
-                ControllerNavigator.updateUINavigationDelegateState()
+                return
             }
+            radialMenuButtonPressed = false
+            radialMenuDelayTimer?.clean()
+            stickReleasedInRadialMenu = false
+            if radialMenuView == nil, let vc = uiNavigationDelegate as? StreamFrameViewController, vc.hasNoPresentedVC {
+                ControllerSupport.sharedInstance()?.sendNavigationButtonPress()
+                return
+            }
+            radialMenuView?.dismiss()
+            radialMenuView = nil
+            updateUINavigationDelegateState()
         }
     }
     

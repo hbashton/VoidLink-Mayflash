@@ -17,6 +17,7 @@
 #import "DataManager.h"
 #include "Limelight.h"
 #include <stdatomic.h>
+#include <math.h>
 
 @import GameController;
 #if !TARGET_OS_TV
@@ -26,6 +27,25 @@
 
 static const double MOUSE_SPEED_DIVISOR = 1.25;
 static __weak ControllerSupport *VLSharedControllerSupport = nil;
+
+static CGFloat normalizedTriggerInput(CGFloat value) {
+    if (!isfinite(value)) return 0;
+    CGFloat clampedValue = fmin(fmax(value, 0), 1);
+    CGFloat deadzone = ControllerUtil.controllerTriggerDeadzone;
+    if (clampedValue <= deadzone) return 0;
+    return (clampedValue - deadzone) / (1.0 - deadzone);
+}
+
+static unsigned char triggerValueToByte(CGFloat value) {
+    return (unsigned char)lrint(normalizedTriggerInput(value) * 255.0);
+}
+
+static BOOL triggerValueIsDigitallyPressed(CGFloat value, BOOL wasPressed) {
+    if (!isfinite(value)) return NO;
+    CGFloat deadzone = ControllerUtil.controllerTriggerDeadzone;
+    CGFloat threshold = wasPressed ? deadzone * 0.8 : deadzone;
+    return fmin(fmax(value, 0), 1) > threshold;
+}
 
 @interface ControllerSupport()
 
@@ -977,8 +997,15 @@ static __weak ControllerSupport *VLSharedControllerSupport = nil;
     for (VoidController* controller in _voidControllers.allValues) {
         BOOL hasButtonHeld = NO;
         if (@available(iOS 14.0, tvOS 14.0, *)) {
-            for (GCControllerButtonInput* button in controller.gamepad.physicalInputProfile.buttons.allValues) {
-                if (button.pressed) {
+            NSDictionary<NSString *, GCControllerButtonInput *> *buttons = controller.gamepad.physicalInputProfile.buttons;
+            for (NSString *buttonName in buttons) {
+                GCControllerButtonInput *button = buttons[buttonName];
+                BOOL isTrigger = [buttonName isEqualToString:GCInputLeftTrigger] ||
+                    [buttonName isEqualToString:GCInputRightTrigger];
+                BOOL isPressed = isTrigger
+                    ? triggerValueIsDigitallyPressed(button.value, NO)
+                    : button.pressed;
+                if (isPressed) {
                     hasButtonHeld = YES;
                     break;
                 }
@@ -991,6 +1018,9 @@ static __weak ControllerSupport *VLSharedControllerSupport = nil;
             controller.reportedArrival = NO;
             controller.hasReceivedInput = NO;
             controller.requiresButtonReleaseAfterOrderReset = hasButtonHeld;
+            controller.radialMenuButtonPressed = NO;
+            controller.leftTriggerDigitallyPressed = NO;
+            controller.rightTriggerDigitallyPressed = NO;
             controller.lastButtonFlags = 0;
             controller.emulatingButtonFlags = 0;
             controller.lastLeftTrigger = 0;
@@ -1028,6 +1058,7 @@ static __weak ControllerSupport *VLSharedControllerSupport = nil;
         }
     }
     [_controllerStreamLock unlock];
+    [ControllerUtil setStreamingPrimaryController:nil];
     Log(LOG_I, @"Controller order reset; cleared host controller ports (send result %d)", result);
     [_delegate gamepadPresenceChanged];
 }
@@ -1251,6 +1282,8 @@ static __weak ControllerSupport *VLSharedControllerSupport = nil;
         if (voidController.streamPlayerIndex == 0) {
             voidController.mergedWithController = _oscController;
             _oscController.mergedWithController = voidController;
+            // Streaming navigation follows the controller that claimed P1.
+            [ControllerUtil setStreamingPrimaryController:voidController.gamepad];
         }
         else {
             voidController.mergedWithController = nil;
@@ -1788,18 +1821,22 @@ double rc_expo(double x, double expo) {
         for (NSNumber *elementFlagId in buttonStates) {
             if (!buttonStates[elementFlagId].boolValue) continue;
             int buttonFlag = elementFlagId.intValue;
-            if (buttonFlag != ControllerElementLeftTrigger && buttonFlag != ControllerElementRightTrigger) {
-                hasPressedButton = YES;
-                break;
-            }
+            if (buttonFlag == ControllerElementLeftTrigger || buttonFlag == ControllerElementRightTrigger) continue;
+            hasPressedButton = YES;
+            break;
         }
 
         CGFloat leftX = gamepad.leftThumbstick.xAxis.value;
         CGFloat leftY = gamepad.leftThumbstick.yAxis.value;
         CGFloat rightX = gamepad.rightThumbstick.xAxis.value;
         CGFloat rightY = gamepad.rightThumbstick.yAxis.value;
-        unsigned char leftTrigger = (unsigned char)(gamepad.leftTrigger.value * 0xFF);
-        unsigned char rightTrigger = (unsigned char)(gamepad.rightTrigger.value * 0xFF);
+        CGFloat leftTriggerValue = gamepad.leftTrigger.value;
+        CGFloat rightTriggerValue = gamepad.rightTrigger.value;
+        hasPressedButton = hasPressedButton ||
+            leftTriggerValue > ControllerUtil.controllerTriggerDeadzone ||
+            rightTriggerValue > ControllerUtil.controllerTriggerDeadzone;
+        unsigned char leftTrigger = triggerValueToByte(leftTriggerValue);
+        unsigned char rightTrigger = triggerValueToByte(rightTriggerValue);
 
         float primaryTouchX = 0;
         float primaryTouchY = 0;
@@ -1828,8 +1865,8 @@ double rc_expo(double x, double expo) {
             radialMenuButton = ControllerNavigator.radialMenuButton;
             controllerNavigatorEnabled = ControllerNavigator.enabled;
         }
-        BOOL isPrimaryController = controller == ControllerUtil.primaryGCController;
         dispatch_async(self->_controllerInputQueue, ^{
+            BOOL newlyClaimedSlot = NO;
             @synchronized (voidController) {
                 if (!voidController.acceptsInput || voidController.gamepad != controller ||
                     voidController.inputOrderGeneration != orderGeneration) return;
@@ -1838,16 +1875,56 @@ double rc_expo(double x, double expo) {
                 }
                 else if (!voidController.hasReceivedInput && hasPressedButton) {
                     voidController.hasReceivedInput = YES;
+                    newlyClaimedSlot = YES;
                 }
+            }
+
+            // Assign the host port before processing this snapshot. That lets
+            // the very first Start press be handled as P1's radial-menu action.
+            if (newlyClaimedSlot) {
+                [self->_controllerStreamLock lock];
+                [self reportControllerArrivalLocked:voidController];
+                [self->_controllerStreamLock unlock];
             }
 
             for (NSNumber *elementFlagId in buttonStates) {
                 BOOL pressed = buttonStates[elementFlagId].boolValue;
                 int buttonFlag = elementFlagId.intValue;
-                [self updateGyroSwitchForController:voidController buttonFlag:buttonFlag pressed:pressed];
                 BOOL isTrigger = buttonFlag == ControllerElementLeftTrigger || buttonFlag == ControllerElementRightTrigger;
-                if (!isTrigger &&
-                    (!isPrimaryController || buttonFlag != radialMenuButton || !controllerNavigatorEnabled)) {
+                if (isTrigger) {
+                    CGFloat triggerValue = buttonFlag == ControllerElementLeftTrigger ? leftTriggerValue : rightTriggerValue;
+                    @synchronized (voidController) {
+                        BOOL wasPressed = buttonFlag == ControllerElementLeftTrigger
+                            ? voidController.leftTriggerDigitallyPressed
+                            : voidController.rightTriggerDigitallyPressed;
+                        pressed = triggerValueIsDigitallyPressed(triggerValue, wasPressed);
+                        if (buttonFlag == ControllerElementLeftTrigger) {
+                            voidController.leftTriggerDigitallyPressed = pressed;
+                        } else {
+                            voidController.rightTriggerDigitallyPressed = pressed;
+                        }
+                    }
+                }
+                [self updateGyroSwitchForController:voidController buttonFlag:buttonFlag pressed:pressed];
+                BOOL isStreamPrimary = voidController.streamPlayerIndex == 0;
+                if (controllerNavigatorEnabled && isStreamPrimary && buttonFlag == radialMenuButton) {
+                    BOOL changed = NO;
+                    @synchronized (voidController) {
+                        if (voidController.radialMenuButtonPressed != pressed) {
+                            voidController.radialMenuButtonPressed = pressed;
+                            changed = YES;
+                        }
+                    }
+                    if (changed) {
+                        dispatch_async(dispatch_get_main_queue(), ^{
+                            [self->_controllerStreamLock lock];
+                            BOOL stillPrimary = [self voidControllerForStreamPlayerIndexLocked:0] == voidController;
+                            [self->_controllerStreamLock unlock];
+                            if (stillPrimary) [ControllerNavigator handleStreamingRadialMenuButton:pressed];
+                        });
+                    }
+                }
+                else if (!isTrigger) {
                     UPDATE_BUTTON_FLAG(voidController, buttonFlag, pressed);
                 }
             }
@@ -1938,8 +2015,13 @@ double rc_expo(double x, double expo) {
         CGFloat leftY = leftStick ? leftStick.yAxis.value : 0;
         CGFloat rightX = rightStick ? rightStick.xAxis.value : 0;
         CGFloat rightY = rightStick ? rightStick.yAxis.value : 0;
-        unsigned char leftTrigger = (unsigned char)(profile.buttons[GCInputLeftTrigger].value * 0xFF);
-        unsigned char rightTrigger = (unsigned char)(profile.buttons[GCInputRightTrigger].value * 0xFF);
+        CGFloat leftTriggerValue = profile.buttons[GCInputLeftTrigger].value;
+        CGFloat rightTriggerValue = profile.buttons[GCInputRightTrigger].value;
+        hasPressedButton = hasPressedButton ||
+            leftTriggerValue > ControllerUtil.controllerTriggerDeadzone ||
+            rightTriggerValue > ControllerUtil.controllerTriggerDeadzone;
+        unsigned char leftTrigger = triggerValueToByte(leftTriggerValue);
+        unsigned char rightTrigger = triggerValueToByte(rightTriggerValue);
 
         float primaryTouchX = 0;
         float primaryTouchY = 0;
@@ -1983,9 +2065,8 @@ double rc_expo(double x, double expo) {
             radialMenuButton = ControllerNavigator.radialMenuButton;
             controllerNavigatorEnabled = ControllerNavigator.enabled;
         }
-        BOOL isPrimaryController = controller == ControllerUtil.primaryGCController;
-
         dispatch_async(self->_controllerInputQueue, ^{
+            BOOL newlyClaimedSlot = NO;
             @synchronized (voidController) {
                 if (!voidController.acceptsInput || voidController.gamepad != controller ||
                     voidController.inputOrderGeneration != orderGeneration) return;
@@ -1994,19 +2075,60 @@ double rc_expo(double x, double expo) {
                 }
                 else if (!voidController.hasReceivedInput && hasPressedButton) {
                     voidController.hasReceivedInput = YES;
+                    newlyClaimedSlot = YES;
                 }
             }
+
+            // Claim the Sunshine port before applying the snapshot that caused
+            // it, so the first input and P1 navigation stay in the same order.
+            if (newlyClaimedSlot) {
+                [self->_controllerStreamLock lock];
+                [self reportControllerArrivalLocked:voidController];
+                [self->_controllerStreamLock unlock];
+            }
+
             for (NSNumber *elementFlagId in buttonStates) {
                 BOOL pressed = buttonStates[elementFlagId].boolValue;
                 int buttonFlag = elementFlagId.intValue;
-                [self updateGyroSwitchForController:voidController buttonFlag:buttonFlag pressed:pressed];
-
                 // Trigger values travel in the dedicated analog trigger fields below;
                 // their ControllerElement IDs are not Moonlight button flags.
                 BOOL isTrigger = buttonFlag == ControllerElementLeftTrigger ||
                     buttonFlag == ControllerElementRightTrigger;
-                if (!isTrigger &&
-                    (!isPrimaryController || buttonFlag != radialMenuButton || !controllerNavigatorEnabled)) {
+                if (isTrigger) {
+                    CGFloat triggerValue = buttonFlag == ControllerElementLeftTrigger ? leftTriggerValue : rightTriggerValue;
+                    @synchronized (voidController) {
+                        BOOL wasPressed = buttonFlag == ControllerElementLeftTrigger
+                            ? voidController.leftTriggerDigitallyPressed
+                            : voidController.rightTriggerDigitallyPressed;
+                        pressed = triggerValueIsDigitallyPressed(triggerValue, wasPressed);
+                        if (buttonFlag == ControllerElementLeftTrigger) {
+                            voidController.leftTriggerDigitallyPressed = pressed;
+                        } else {
+                            voidController.rightTriggerDigitallyPressed = pressed;
+                        }
+                    }
+                }
+                [self updateGyroSwitchForController:voidController buttonFlag:buttonFlag pressed:pressed];
+
+                BOOL isStreamPrimary = voidController.streamPlayerIndex == 0;
+                if (controllerNavigatorEnabled && isStreamPrimary && buttonFlag == radialMenuButton) {
+                    BOOL changed = NO;
+                    @synchronized (voidController) {
+                        if (voidController.radialMenuButtonPressed != pressed) {
+                            voidController.radialMenuButtonPressed = pressed;
+                            changed = YES;
+                        }
+                    }
+                    if (changed) {
+                        dispatch_async(dispatch_get_main_queue(), ^{
+                            [self->_controllerStreamLock lock];
+                            BOOL stillPrimary = [self voidControllerForStreamPlayerIndexLocked:0] == voidController;
+                            [self->_controllerStreamLock unlock];
+                            if (stillPrimary) [ControllerNavigator handleStreamingRadialMenuButton:pressed];
+                        });
+                    }
+                }
+                else if (!isTrigger) {
                     UPDATE_BUTTON_FLAG(voidController, buttonFlag, pressed);
                 }
             }
@@ -2604,6 +2726,7 @@ double rc_expo(double x, double expo) {
     _controllerInputQueue = dispatch_queue_create(
         "com.voidlink.controller-input", inputQueueAttributes);
     _voidControllers = [[NSMutableDictionary alloc] init];
+    [ControllerUtil beginStreamingPrimaryControllerSelection];
     [ControllerUtil.activeStreamingGCControllers removeAllObjects];
     _controllerNumbers = 0;
     _reservedControllerNumbers = 0;
@@ -2664,9 +2787,11 @@ double rc_expo(double x, double expo) {
         }
 
 
+        BOOL disconnectedStreamPrimary = NO;
         [self->_controllerStreamLock lock];
         VoidController* voidController = [self voidControllerForGamepadLocked:controller];
         if (voidController != nil) {
+            disconnectedStreamPrimary = voidController.streamPlayerIndex == 0;
             @synchronized (voidController) {
                 voidController.acceptsInput = NO;
             }
@@ -2691,6 +2816,8 @@ double rc_expo(double x, double expo) {
                 voidController.emulatingButtonFlags = 0;
                 voidController.lastLeftTrigger = 0;
                 voidController.lastRightTrigger = 0;
+                voidController.leftTriggerDigitallyPressed = NO;
+                voidController.rightTriggerDigitallyPressed = NO;
                 voidController.lastLeftStickX = 0;
                 voidController.lastLeftStickY = 0;
                 voidController.lastRightStickX = 0;
@@ -2709,6 +2836,7 @@ double rc_expo(double x, double expo) {
             }
             [self->_controllerStreamLock unlock];
         }
+        if (disconnectedStreamPrimary) [ControllerUtil setStreamingPrimaryController:nil];
         Log(LOG_I, @"Unassigning controller endpoint %ld from Sunshine port %d", (long)(voidController ? voidController.playerIndex : -1), voidController ? voidController.streamPlayerIndex : -1);
 
         if (voidController) {
@@ -2999,6 +3127,7 @@ double rc_expo(double x, double expo) {
     [_controllerStreamLock lock];
     [_voidControllers removeAllObjects];
     [_controllerStreamLock unlock];
+    [ControllerUtil endStreamingPrimaryControllerSelection];
     
     #if !TARGET_OS_TV
         [self cleanupControllerMotion:_oscController];

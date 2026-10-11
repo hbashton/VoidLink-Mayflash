@@ -1393,6 +1393,18 @@ import UIKit
     @objc static weak var primaryGCController: GCController?
     static var primaryControllerElementMap: [ControllerElement : GCControllerElement]?
     private static var primaryControllerAxisStates: [ControllerElement : ComparisonResult] = [:]
+    static let triggerDeadzoneDefaultsKey = "controllerTriggerDeadzone"
+    static let defaultTriggerDeadzone: CGFloat = 0.20
+    @objc static var controllerTriggerDeadzone: CGFloat {
+        let defaults = UserDefaults.standard
+        guard defaults.object(forKey: triggerDeadzoneDefaultsKey) != nil else {
+            return defaultTriggerDeadzone
+        }
+        return min(max(CGFloat(defaults.double(forKey: triggerDeadzoneDefaultsKey)), 0), 0.5)
+    }
+    private static weak var preStreamingPrimaryGCController: GCController?
+    private static weak var streamingPrimaryGCController: GCController?
+    private static var streamingPrimarySelectionActive = false
 
     private static func supportsControllerInput(_ controller: GCController) -> Bool {
         if controller.extendedGamepad != nil { return true }
@@ -1463,6 +1475,26 @@ import UIKit
     }
 
     private static func preparePrimaryController() {
+        if streamingPrimarySelectionActive {
+            guard let controller = streamingPrimaryGCController,
+                  GCController.controllers().contains(where: { $0 === controller }),
+                  supportsControllerInput(controller) else {
+                stopListeningPrimaryController(stopListenToRadialMenuButton: true)
+                primaryGCController = nil
+                primaryControllerElementMap = nil
+                if #available(iOS 13.0, *) {
+                    ControllerNavigator.stop()
+                }
+                return
+            }
+
+            if primaryGCController !== controller {
+                stopListeningPrimaryController(stopListenToRadialMenuButton: true)
+                setGCControllerToPrimary(controller)
+            }
+            return
+        }
+
         guard let controller = GCController.controllers().first(where: { supportsControllerInput($0) }) else {
             stopListeningPrimaryController()
             ControllerUtil.primaryGCController = nil
@@ -1541,6 +1573,71 @@ import UIKit
         }
     }
 
+    @objc static func beginStreamingPrimaryControllerSelection() {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async {
+                beginStreamingPrimaryControllerSelection()
+            }
+            return
+        }
+        guard !streamingPrimarySelectionActive else { return }
+        preStreamingPrimaryGCController = primaryGCController
+        streamingPrimaryGCController = nil
+        streamingPrimarySelectionActive = true
+    }
+
+    @objc static func setStreamingPrimaryController(_ controller: GCController?) {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async {
+                setStreamingPrimaryController(controller)
+            }
+            return
+        }
+        if !streamingPrimarySelectionActive {
+            beginStreamingPrimaryControllerSelection()
+        }
+
+        guard let controller else {
+            streamingPrimaryGCController = nil
+            stopListeningPrimaryController(stopListenToRadialMenuButton: true)
+            primaryGCController = nil
+            primaryControllerElementMap = nil
+            if #available(iOS 13.0, *) {
+                ControllerNavigator.stop()
+            }
+            return
+        }
+
+        streamingPrimaryGCController = controller
+        guard primaryGCController !== controller else { return }
+        stopListeningPrimaryController(stopListenToRadialMenuButton: true)
+        setGCControllerToPrimary(controller)
+    }
+
+    @objc static func endStreamingPrimaryControllerSelection() {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async {
+                endStreamingPrimaryControllerSelection()
+            }
+            return
+        }
+        guard streamingPrimarySelectionActive else { return }
+
+        streamingPrimarySelectionActive = false
+        streamingPrimaryGCController = nil
+        let previousController = preStreamingPrimaryGCController
+        preStreamingPrimaryGCController = nil
+
+        if let previousController,
+           GCController.controllers().contains(where: { $0 === previousController }),
+           supportsControllerInput(previousController) {
+            stopListeningPrimaryController(stopListenToRadialMenuButton: true)
+            setGCControllerToPrimary(previousController)
+        } else {
+            preparePrimaryController()
+        }
+    }
+
     @objc static func stopListeningPrimaryController(stopListenToRadialMenuButton: Bool = false) {
         guard let primaryControllerButtonMap = primaryControllerElementMap else { return }
         for gcElement in primaryControllerButtonMap.values {
@@ -1549,6 +1646,7 @@ import UIKit
                     if !stopListenToRadialMenuButton, gcButton === primaryControllerButtonMap[ControllerNavigator.radialMenuButton] as? GCControllerButtonInput {continue}
                 }
                 gcButton.pressedChangedHandler = nil
+                gcButton.valueChangedHandler = nil
             }
             if let gcStick = gcElement as? GCControllerDirectionPad {
                 gcStick.valueChangedHandler = nil
@@ -1580,8 +1678,22 @@ import UIKit
                 }
             }
             if let gcButton = elementMap[button] as? GCControllerButtonInput {
-                gcButton.pressedChangedHandler = { _, _, pressed in
-                    handler(pressed)
+                if button == .leftTrigger || button == .rightTrigger {
+                    var triggerWasPressed = false
+                    gcButton.valueChangedHandler = { _, value, _ in
+                        let pressThreshold = controllerTriggerDeadzone
+                        let releaseThreshold = pressThreshold * 0.8
+                        let triggerIsPressed = triggerWasPressed
+                            ? CGFloat(value) > releaseThreshold
+                            : CGFloat(value) > pressThreshold
+                        guard triggerIsPressed != triggerWasPressed else { return }
+                        triggerWasPressed = triggerIsPressed
+                        handler(triggerIsPressed)
+                    }
+                } else {
+                    gcButton.pressedChangedHandler = { _, _, pressed in
+                        handler(pressed)
+                    }
                 }
             }
         }

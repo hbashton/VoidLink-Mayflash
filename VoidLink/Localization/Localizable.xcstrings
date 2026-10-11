@@ -5295,6 +5295,29 @@
         }
       }
     },
+    "Analog Trigger Deadzone" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "模拟扳机死区"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "類比扳機死區"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "類比扳機死區"
+          }
+        }
+      }
+    },
     "applications" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -7269,25 +7292,54 @@
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "VoidLink now supports global controller navigation! Go to [Settings Menu] → [Controller] section → turn [Controller Navigation] off and on again to customize radial menu buttons and controller mouse mode. \nRadial menu button is by default:\n[RT], and long pressing [Start] during streaming.\n"
+            "value" : "During a stream, press [Start] to open the radial menu. Outside a stream, press [RT]. Follow the prompts to choose the stick and buttons for mouse navigation."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "VoidLink已支持全局手柄导航！前往 [设置菜单] → [手柄] 分区 → 关闭再打开 [手柄导航]，即可自定义环形菜单按键与手柄鼠标模式。\n默认环形菜单按键为 [右板机]，串流状态下为长按 [Start] 键。"
+            "value" : "串流时按 [Start] 打开环形菜单；未串流时按 [RT]。按照提示选择用于鼠标导航的摇杆和按键。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "VoidLink 已支援全域手把導航！前往 [設定選單] → [手把] 分區 → 關閉再開啟 [手把導航]，即可自訂環形選單按鍵與手把滑鼠模式。\n預設環形選單按鍵為 [右扳機]，串流狀態下為長按 [Start] 鍵。"
+            "value" : "串流時按 [Start] 開啟環形選單；未串流時按 [RT]。依照提示選擇用於滑鼠導覽的搖桿和按鈕。"
           }
         },
         "zh-HK" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "VoidLink 已支援全域手把導航！前往 [設定選單] → [手把] 分區 → 關閉再開啟 [手把導航]，即可自訂環形選單按鍵與手把滑鼠模式。\n預設環形選單按鍵為 [右扳機]，串流狀態下為長按 [Start] 鍵。"
+            "value" : "串流時按 [Start] 開啟環形選單；未串流時按 [RT]。依照提示選擇用於滑鼠導覽的搖桿和按鈕。"
+          }
+        }
+      }
+    },
+    "controllerTriggerDeadzoneStackTip" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Trigger movement below this value is ignored. Values above it are rescaled to the full range, so the analog trigger remains usable."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "低于此值的扳机输入会被忽略。高于此值的输入会重新映射到完整范围，扳机仍可进行模拟控制。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "低於此值的扳機輸入會被忽略。高於此值的輸入會重新映射至完整範圍，扳機仍可進行類比控制。"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "低於此值的扳機輸入會被忽略。高於此值的輸入會重新映射至完整範圍，扳機仍可進行類比控制。"
           }
         }
       }

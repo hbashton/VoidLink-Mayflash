@@ -73,6 +73,9 @@ typedef NS_ENUM(NSInteger, ControllerDeviceBatteryState) {
 @property (nonatomic)                   BOOL waitsForInputBeforeArrival;
 @property (nonatomic)                   BOOL hasReceivedInput;
 @property (nonatomic)                   BOOL requiresButtonReleaseAfterOrderReset;
+@property (nonatomic)                   BOOL radialMenuButtonPressed;
+@property (nonatomic)                   BOOL leftTriggerDigitallyPressed;
+@property (nonatomic)                   BOOL rightTriggerDigitallyPressed;
 @property (nonatomic)                   NSUInteger inputOrderGeneration;
 @property (nonatomic)                   BOOL acceptsInput;
 @property (nonatomic)                   VoidController* _Nullable mergedWithController;
