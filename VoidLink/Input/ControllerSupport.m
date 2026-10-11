@@ -16,6 +16,7 @@
 
 #import "DataManager.h"
 #include "Limelight.h"
+#include <stdatomic.h>
 
 @import GameController;
 #if !TARGET_OS_TV
@@ -30,6 +31,10 @@ static __weak ControllerSupport *VLSharedControllerSupport = nil;
 
 @property (assign,nonatomic) bool shallDisableGyroHotSwitch;
 - (void) listenToGenericGCController:(GCController*)controller API_AVAILABLE(ios(16.0), tvos(16.0));
+- (void) updateGyroSwitchForController:(VoidController*)controller buttonFlag:(int)buttonFlag pressed:(BOOL)pressed;
+- (void) resetGyroSwitchForPlayerIndex:(NSInteger)playerIndex;
+- (void) releaseControllerTouchpadContacts:(VoidController*)controller;
+- (BOOL) reportControllerArrivalLocked:(VoidController*)voidController;
 
 @end
 
@@ -43,6 +48,7 @@ static __weak ControllerSupport *VLSharedControllerSupport = nil;
     id _keyboardDisconnectObserver;
     
     NSLock *_controllerStreamLock;
+    dispatch_queue_t _genericControllerInputQueue;
     NSMutableDictionary *_voidControllers;
     StreamConfiguration* _streamConfig;
     __weak id<ControllerSupportDelegate> _delegate;
@@ -80,12 +86,16 @@ static __weak ControllerSupport *VLSharedControllerSupport = nil;
     bool _captureMouse;
     
     bool _controllerGyroSwitchEnabled;
-    bool _gyroEnabledFlag; // bool flag for both DS4 gyro & VL motion control
+    bool _isCleaningUp;
+    atomic_bool _gyroEnabledFlag; // Read by motion timers and written by controller callbacks.
+    bool _gyroToggleEnabled;
     int _controllerGyroSwitchToggle;
     int _controllerGyroSwitchHold;
     bool _reverseHoldButton;
     bool _controllerGyroSwitchTogglePressed;
     bool _controllerGyroSwitchHoldPressed;
+    uint32_t _controllerGyroSwitchTogglePressedMask;
+    uint32_t _controllerGyroSwitchHoldPressedMask;
     ControllerGyroSwitchMode _gyroSwitchMode;
 
     uint64_t _authoredHapticsGeneration;
@@ -870,7 +880,7 @@ static __weak ControllerSupport *VLSharedControllerSupport = nil;
         }
         
         // Only send controller events if we successfully reported controller arrival
-        if ([self reportControllerArrival:controller]) {
+        if ([self reportControllerArrivalLocked:controller]) {
             uint32_t buttonFlags = controller.lastButtonFlags;
             uint8_t leftTrigger = controller.lastLeftTrigger;
             uint8_t rightTrigger = controller.lastRightTrigger;
@@ -1037,7 +1047,8 @@ static __weak ControllerSupport *VLSharedControllerSupport = nil;
     }
 }
 
--(BOOL) reportControllerArrival:(VoidController*) voidController
+// Callers must hold _controllerStreamLock so arrival and input packets stay ordered.
+-(BOOL) reportControllerArrivalLocked:(VoidController*) voidController
 {
     // Only report arrival once
     if (voidController.reportedArrival) {
@@ -1089,6 +1100,9 @@ static __weak ControllerSupport *VLSharedControllerSupport = nil;
                 if (buttons[GCInputXboxPaddleFour] != nil) supportedButtonFlags |= PADDLE4_FLAG;
                 if (buttons[GCInputDualShockTouchpadButton] != nil) supportedButtonFlags |= TOUCHPAD_FLAG;
                 if (profile.dpads[GCInputDualShockTouchpadOne] != nil) capabilities |= LI_CCAP_TOUCHPAD;
+                if (buttons[GCInputLeftTrigger].isAnalog || buttons[GCInputRightTrigger].isAnalog) {
+                    capabilities |= LI_CCAP_ANALOG_TRIGGERS;
+                }
                 if (@available(iOS 15.0, tvOS 15.0, *)) {
                     if (buttons[GCInputButtonShare] != nil) supportedButtonFlags |= MISC_FLAG;
                 }
@@ -1310,21 +1324,24 @@ static __weak ControllerSupport *VLSharedControllerSupport = nil;
 -(void) handleControllerTouchpad:(VoidController*)controller touch:(GCControllerDirectionPad*)touch index:(int)index
 {
     controller_touch_context_t context = index == 0 ? controller.primaryTouch : controller.secondaryTouch;
+    float x = touch.xAxis.value;
+    float y = touch.yAxis.value;
+    BOOL isActive = x != 0 || y != 0;
     
     // This magic is courtesy of SDL
-    float normalizedX = (1.0f + touch.xAxis.value) * 0.5f;
-    float normalizedY = 1.0f - (1.0f + touch.yAxis.value) * 0.5f;
+    float normalizedX = (1.0f + x) * 0.5f;
+    float normalizedY = 1.0f - (1.0f + y) * 0.5f;
     
     // If we went from a touch to no touch, generate a touch up event
-    if ((context.lastX || context.lastY) && (!touch.xAxis.value && !touch.yAxis.value)) {
+    if (context.isActive && !isActive) {
         LiSendControllerTouchEvent(controller.playerIndex, LI_TOUCH_EVENT_UP, index, normalizedX, normalizedY, 1.0f);
     }
-    else if (touch.xAxis.value || touch.yAxis.value) {
+    else if (isActive) {
         // If we went from no touch to a touch, generate a touch down event
-        if (!context.lastX && !context.lastY) {
+        if (!context.isActive) {
             LiSendControllerTouchEvent(controller.playerIndex, LI_TOUCH_EVENT_DOWN, index, normalizedX, normalizedY, 1.0f);
         }
-        else if (context.lastX != touch.xAxis.value || context.lastY != touch.yAxis.value) {
+        else if (context.lastX != x || context.lastY != y) {
             // Otherwise it's just a move
             LiSendControllerTouchEvent(controller.playerIndex, LI_TOUCH_EVENT_MOVE, index, normalizedX, normalizedY, 1.0f);
         }
@@ -1333,16 +1350,44 @@ static __weak ControllerSupport *VLSharedControllerSupport = nil;
     // We have to assign the whole struct because this is a property rather than a standard
     // field that we could modify through a pointer.
     if (index == 0) {
-        controller.primaryTouch = (controller_touch_context_t) {
-            touch.xAxis.value,
-            touch.yAxis.value
-        };
+        controller.primaryTouch = (controller_touch_context_t) { x, y, isActive };
     }
     else {
-        controller.secondaryTouch = (controller_touch_context_t) {
-            touch.xAxis.value,
-            touch.yAxis.value
-        };
+        controller.secondaryTouch = (controller_touch_context_t) { x, y, isActive };
+    }
+}
+
+-(void) handleControllerTouchpad:(VoidController*)controller touchpad:(GCControllerTouchpad*)touchpad index:(int)index API_AVAILABLE(ios(16.0), tvos(16.0))
+{
+    controller_touch_context_t context = index == 0 ? controller.primaryTouch : controller.secondaryTouch;
+    GCControllerDirectionPad *touchSurface = touchpad.touchSurface;
+    float x = touchSurface.xAxis.value;
+    float y = touchSurface.yAxis.value;
+    BOOL isActive = touchpad.touchState != GCTouchStateUp;
+
+    // A finger can be touching at the exact center (0,0). Use Game Controller's
+    // touch state to distinguish that from a released finger.
+    float normalizedX = (1.0f + x) * 0.5f;
+    float normalizedY = 1.0f - (1.0f + y) * 0.5f;
+
+    if (context.isActive && !isActive) {
+        LiSendControllerTouchEvent(controller.playerIndex, LI_TOUCH_EVENT_UP, index, normalizedX, normalizedY, 1.0f);
+    }
+    else if (isActive) {
+        if (!context.isActive) {
+            LiSendControllerTouchEvent(controller.playerIndex, LI_TOUCH_EVENT_DOWN, index, normalizedX, normalizedY, 1.0f);
+        }
+        else if (context.lastX != x || context.lastY != y) {
+            LiSendControllerTouchEvent(controller.playerIndex, LI_TOUCH_EVENT_MOVE, index, normalizedX, normalizedY, 1.0f);
+        }
+    }
+
+    controller_touch_context_t newContext = { x, y, isActive };
+    if (index == 0) {
+        controller.primaryTouch = newContext;
+    }
+    else {
+        controller.secondaryTouch = newContext;
     }
 }
 
@@ -1368,6 +1413,103 @@ double rc_expo(double x, double expo) {
         else [self->motionHandler stopMotionUpdateWithInterruptNoneGyroInput:false];
     }
     self->_gyroEnabledFlag = self->_gyroEnabledFlag || !self->_controllerGyroSwitchEnabled;
+}
+
+- (void)updateGyroSwitchForController:(VoidController*)controller buttonFlag:(int)buttonFlag pressed:(BOOL)pressed {
+    NSInteger playerIndex = controller.playerIndex;
+    if (playerIndex < 0 || playerIndex >= 32) return;
+
+    uint32_t playerMask = (uint32_t)1 << playerIndex;
+    @synchronized (self) {
+        if (self->_isCleaningUp) return;
+
+        BOOL isToggleButton = buttonFlag == self->_controllerGyroSwitchToggle;
+        BOOL isHoldButton = buttonFlag == self->_controllerGyroSwitchHold;
+        if (!self->_controllerGyroSwitchEnabled || (!isToggleButton && !isHoldButton)) return;
+
+        BOOL wasGyroEnabled = self->_gyroEnabledFlag;
+        if (isToggleButton) {
+            BOOL wasPressed = (self->_controllerGyroSwitchTogglePressedMask & playerMask) != 0;
+            if (pressed && !wasPressed) {
+                self->_controllerGyroSwitchTogglePressedMask |= playerMask;
+                self->_gyroToggleEnabled = !self->_gyroToggleEnabled;
+            }
+            else if (!pressed && wasPressed) {
+                self->_controllerGyroSwitchTogglePressedMask &= ~playerMask;
+            }
+        }
+
+        if (isHoldButton) {
+            BOOL wasPressed = (self->_controllerGyroSwitchHoldPressedMask & playerMask) != 0;
+            if (pressed && !wasPressed) {
+                self->_controllerGyroSwitchHoldPressedMask |= playerMask;
+            }
+            else if (!pressed && wasPressed) {
+                self->_controllerGyroSwitchHoldPressedMask &= ~playerMask;
+            }
+        }
+
+        BOOL holdIsActive = self->_controllerGyroSwitchHoldPressedMask != 0;
+        BOOL toggleButtonConfigured = self->_controllerGyroSwitchToggle != ControllerElementNull;
+        self->_gyroEnabledFlag = holdIsActive
+            ? !self->_reverseHoldButton
+            : (toggleButtonConfigured ? self->_gyroToggleEnabled : self->_reverseHoldButton);
+
+        if (self->_gyroEnabledFlag != wasGyroEnabled) {
+            // Generic-profile input is processed on a worker queue, while the
+            // motion callback and its stick-mixing state run on the main queue.
+            dispatch_async(dispatch_get_main_queue(), ^{
+                @synchronized (self) {
+                    if (self->_isCleaningUp) return;
+                    [self switchMotionControlOnOffByControllerButton];
+                }
+            });
+        }
+    }
+}
+
+- (void)releaseControllerTouchpadContacts:(VoidController*)controller {
+    for (int index = 0; index < 2; index++) {
+        controller_touch_context_t context = index == 0 ? controller.primaryTouch : controller.secondaryTouch;
+        if (context.isActive) {
+            float normalizedX = (1.0f + context.lastX) * 0.5f;
+            float normalizedY = 1.0f - (1.0f + context.lastY) * 0.5f;
+            LiSendControllerTouchEvent((uint8_t)controller.playerIndex, LI_TOUCH_EVENT_UP,
+                                       (uint32_t)index, normalizedX, normalizedY, 1.0f);
+        }
+
+        controller_touch_context_t emptyContext = {0};
+        if (index == 0) {
+            controller.primaryTouch = emptyContext;
+        }
+        else {
+            controller.secondaryTouch = emptyContext;
+        }
+    }
+}
+
+- (void)resetGyroSwitchForPlayerIndex:(NSInteger)playerIndex {
+    if (playerIndex < 0 || playerIndex >= 32) return;
+
+    uint32_t playerMask = (uint32_t)1 << playerIndex;
+    @synchronized (self) {
+        BOOL wasGyroEnabled = self->_gyroEnabledFlag;
+        BOOL hadSwitchButtonPressed =
+            (self->_controllerGyroSwitchTogglePressedMask & playerMask) != 0 ||
+            (self->_controllerGyroSwitchHoldPressedMask & playerMask) != 0;
+        self->_controllerGyroSwitchTogglePressedMask &= ~playerMask;
+        self->_controllerGyroSwitchHoldPressedMask &= ~playerMask;
+        if (hadSwitchButtonPressed) {
+            BOOL holdIsActive = self->_controllerGyroSwitchHoldPressedMask != 0;
+            BOOL toggleButtonConfigured = self->_controllerGyroSwitchToggle != ControllerElementNull;
+            self->_gyroEnabledFlag = holdIsActive
+                ? !self->_reverseHoldButton
+                : (toggleButtonConfigured ? self->_gyroToggleEnabled : self->_reverseHoldButton);
+        }
+        if (self->_gyroEnabledFlag != wasGyroEnabled) {
+            [self switchMotionControlOnOffByControllerButton];
+        }
+    }
 }
 
 - (void)sendNavigationButtonPress {
@@ -1442,46 +1584,42 @@ double rc_expo(double x, double expo) {
                 GCControllerElement * element = (GCControllerElement *)elementDict[elementFlagId];
                 if ([element isKindOfClass:[GCControllerButtonInput class]]) {
                     GCControllerButtonInput* button = (GCControllerButtonInput *)element;
+                    int buttonFlag = elementFlagId.intValue;
                     if(controllerNavigatorEnabled && voidController.playerIndex==0 && elementFlagId.intValue == radialMenuButton){
                         if(!button.pressed){
                             // [self sendNavigationButtonPress:voidController];
                         }
                     }
 
-                    // controller switch buttons
-                    if(true){
-                        if(button.pressed){
-                            if (elementFlagId.intValue == self->_controllerGyroSwitchToggle
-                                && !self->_controllerGyroSwitchTogglePressed) {
-                                self->_controllerGyroSwitchTogglePressed = true;
-                                
-                                self->_gyroEnabledFlag = !self->_gyroEnabledFlag;
-                                [self switchMotionControlOnOffByControllerButton];
-                            }
-                            if (elementFlagId.intValue == self->_controllerGyroSwitchHold
-                                && !self->_controllerGyroSwitchHoldPressed) {
-                                self->_controllerGyroSwitchHoldPressed = true;
-                                
-                                self->_gyroEnabledFlag = !self->_reverseHoldButton;
-                                [self switchMotionControlOnOffByControllerButton];
-                            }
+                    // Preserve the existing extended-gamepad gyro switch behavior.
+                    if (button.pressed) {
+                        if (buttonFlag == self->_controllerGyroSwitchToggle
+                            && !self->_controllerGyroSwitchTogglePressed) {
+                            self->_controllerGyroSwitchTogglePressed = true;
+                            self->_gyroEnabledFlag = !self->_gyroEnabledFlag;
+                            [self switchMotionControlOnOffByControllerButton];
                         }
-                        else{
-                            if (elementFlagId.intValue == self->_controllerGyroSwitchToggle
-                                && self->_controllerGyroSwitchTogglePressed) {
-                                self->_controllerGyroSwitchTogglePressed = false;
-                            }
-                            if (elementFlagId.intValue == self->_controllerGyroSwitchHold
-                                && self->_controllerGyroSwitchHoldPressed) {
-                                self->_controllerGyroSwitchHoldPressed = false;
-                                
-                                self->_gyroEnabledFlag = self->_reverseHoldButton;
-                                [self switchMotionControlOnOffByControllerButton];
-                            }
+                        if (buttonFlag == self->_controllerGyroSwitchHold
+                            && !self->_controllerGyroSwitchHoldPressed) {
+                            self->_controllerGyroSwitchHoldPressed = true;
+                            self->_gyroEnabledFlag = !self->_reverseHoldButton;
+                            [self switchMotionControlOnOffByControllerButton];
+                        }
+                    }
+                    else {
+                        if (buttonFlag == self->_controllerGyroSwitchToggle
+                            && self->_controllerGyroSwitchTogglePressed) {
+                            self->_controllerGyroSwitchTogglePressed = false;
+                        }
+                        if (buttonFlag == self->_controllerGyroSwitchHold
+                            && self->_controllerGyroSwitchHoldPressed) {
+                            self->_controllerGyroSwitchHoldPressed = false;
+                            self->_gyroEnabledFlag = self->_reverseHoldButton;
+                            [self switchMotionControlOnOffByControllerButton];
                         }
                     }
                     
-                    if(controller != ControllerUtil.primaryGCController || elementFlagId.intValue!=radialMenuButton || !controllerNavigatorEnabled) UPDATE_BUTTON_FLAG(voidController, elementFlagId.intValue, button.pressed);
+                    if(controller != ControllerUtil.primaryGCController || buttonFlag != radialMenuButton || !controllerNavigatorEnabled) UPDATE_BUTTON_FLAG(voidController, buttonFlag, button.pressed);
                 }
             }
             
@@ -1506,7 +1644,8 @@ double rc_expo(double x, double expo) {
              ||!self->oscProfile.rollToLeftStick) [self updateLeftStick:voidController x:leftStickX y:leftStickY];
              */
             
-            if([self useMotionHandler]
+            if(voidController.playerIndex == 0
+               && [self useMotionHandler]
                && self->motionHandler.motionControlStarted
                && self->oscProfile.mapGyroTo==mapGyroToControllerStick
                && self->oscProfile.yawPitchToRightStick
@@ -1516,7 +1655,8 @@ double rc_expo(double x, double expo) {
             }
             else [self updateRightStick: voidController.playerIndex==0?self->_oscController:voidController x:rightStickX y:rightStickY];
             
-            if([self useMotionHandler]
+            if(voidController.playerIndex == 0
+               && [self useMotionHandler]
                && self->motionHandler.motionControlStarted
                && self->oscProfile.mapGyroTo==mapGyroToControllerStick
                && self->oscProfile.rollToLeftStick
@@ -1549,48 +1689,33 @@ double rc_expo(double x, double expo) {
 - (void) listenToGenericGCController:(GCController*) controller API_AVAILABLE(ios(16.0), tvos(16.0)) {
     [ControllerUtil listenPhysicalProfileWithController:controller
                                             swapABXY:self->_swapABXYButtons
-                                              handler:^(NSDictionary *elementDict, GCPhysicalInputProfile *profile, GCControllerElement *changedElement) {
-        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{
-            VoidController *voidController = [self->_voidControllers objectForKey:@(controller.playerIndex)];
-            if (voidController == nil) return;
+                                              handler:^(NSDictionary *elementDict, GCPhysicalInputProfile *profile) {
+        VoidController *voidController = [self->_voidControllers objectForKey:@(controller.playerIndex)];
+        if (voidController == nil || voidController.gamepad != controller) return;
 
-            int radialMenuButton = ControllerElementNull;
-            BOOL controllerNavigatorEnabled = NO;
-            if (@available(iOS 13.0, tvOS 13.0, *)) {
-                radialMenuButton = ControllerNavigator.radialMenuButton;
-                controllerNavigatorEnabled = ControllerNavigator.enabled;
-            }
+        int radialMenuButton = ControllerElementNull;
+        BOOL controllerNavigatorEnabled = NO;
+        if (@available(iOS 13.0, tvOS 13.0, *)) {
+            radialMenuButton = ControllerNavigator.radialMenuButton;
+            controllerNavigatorEnabled = ControllerNavigator.enabled;
+        }
+        BOOL isPrimaryController = controller == ControllerUtil.primaryGCController;
 
+        dispatch_async(self->_genericControllerInputQueue, ^{
             for (NSNumber *elementFlagId in elementDict) {
                 GCControllerElement *mappedElement = elementDict[elementFlagId];
                 if (![mappedElement isKindOfClass:[GCControllerButtonInput class]]) continue;
 
                 GCControllerButtonInput *button = (GCControllerButtonInput *)mappedElement;
                 int buttonFlag = elementFlagId.intValue;
-                if (button.pressed) {
-                    if (buttonFlag == self->_controllerGyroSwitchToggle && !self->_controllerGyroSwitchTogglePressed) {
-                        self->_controllerGyroSwitchTogglePressed = YES;
-                        self->_gyroEnabledFlag = !self->_gyroEnabledFlag;
-                        [self switchMotionControlOnOffByControllerButton];
-                    }
-                    if (buttonFlag == self->_controllerGyroSwitchHold && !self->_controllerGyroSwitchHoldPressed) {
-                        self->_controllerGyroSwitchHoldPressed = YES;
-                        self->_gyroEnabledFlag = !self->_reverseHoldButton;
-                        [self switchMotionControlOnOffByControllerButton];
-                    }
-                }
-                else {
-                    if (buttonFlag == self->_controllerGyroSwitchToggle && self->_controllerGyroSwitchTogglePressed) {
-                        self->_controllerGyroSwitchTogglePressed = NO;
-                    }
-                    if (buttonFlag == self->_controllerGyroSwitchHold && self->_controllerGyroSwitchHoldPressed) {
-                        self->_controllerGyroSwitchHoldPressed = NO;
-                        self->_gyroEnabledFlag = self->_reverseHoldButton;
-                        [self switchMotionControlOnOffByControllerButton];
-                    }
-                }
+                [self updateGyroSwitchForController:voidController buttonFlag:buttonFlag pressed:button.pressed];
 
-                if (controller != ControllerUtil.primaryGCController || buttonFlag != radialMenuButton || !controllerNavigatorEnabled) {
+                // Trigger values travel in the dedicated analog trigger fields below;
+                // their ControllerElement IDs are not Moonlight button flags.
+                BOOL isTrigger = buttonFlag == ControllerElementLeftTrigger ||
+                    buttonFlag == ControllerElementRightTrigger;
+                if (!isTrigger &&
+                    (!isPrimaryController || buttonFlag != radialMenuButton || !controllerNavigatorEnabled)) {
                     UPDATE_BUTTON_FLAG(voidController, buttonFlag, button.pressed);
                 }
             }
@@ -1613,7 +1738,8 @@ double rc_expo(double x, double expo) {
             short rightStickX = (short)rightOffset.dx;
             short rightStickY = (short)rightOffset.dy;
 
-            if ([self useMotionHandler]
+            if (voidController.playerIndex == 0
+                && [self useMotionHandler]
                 && self->motionHandler.motionControlStarted
                 && self->oscProfile.mapGyroTo == mapGyroToControllerStick
                 && self->oscProfile.yawPitchToRightStick
@@ -1621,12 +1747,13 @@ double rc_expo(double x, double expo) {
                 [self->motionHandler mixPhysicalRightStickAndGyroInputWithX:rightStickX y:rightStickY];
             }
             else {
-                [self updateRightStick:voidController.playerIndex == 0 ? self->_oscController : voidController
+                [self updateRightStick:(voidController.playerIndex == 0 ? self->_oscController : voidController)
                                      x:rightStickX
                                      y:rightStickY];
             }
 
-            if ([self useMotionHandler]
+            if (voidController.playerIndex == 0
+                && [self useMotionHandler]
                 && self->motionHandler.motionControlStarted
                 && self->oscProfile.mapGyroTo == mapGyroToControllerStick
                 && self->oscProfile.rollToLeftStick
@@ -1634,7 +1761,7 @@ double rc_expo(double x, double expo) {
                 [self->motionHandler mixPhysicalLeftStickAndGyroInputWithX:leftStickX y:leftStickY];
             }
             else {
-                [self updateLeftStick:voidController.playerIndex == 0 ? self->_oscController : voidController
+                [self updateLeftStick:(voidController.playerIndex == 0 ? self->_oscController : voidController)
                                     x:leftStickX
                                     y:leftStickY];
             }
@@ -1643,6 +1770,21 @@ double rc_expo(double x, double expo) {
             unsigned char rightTrigger = (unsigned char)(profile.buttons[GCInputRightTrigger].value * 0xFF);
             [self updateTriggers:voidController left:leftTrigger right:rightTrigger];
             [self updateFinished:voidController];
+
+            GCControllerTouchpad *primaryTouchpad = profile.touchpads[GCInputDualShockTouchpadOne];
+            if (primaryTouchpad != nil) {
+                [self handleControllerTouchpad:voidController touchpad:primaryTouchpad index:0];
+            }
+            else if (profile.dpads[GCInputDualShockTouchpadOne] != nil) {
+                [self handleControllerTouchpad:voidController touch:profile.dpads[GCInputDualShockTouchpadOne] index:0];
+            }
+            GCControllerTouchpad *secondaryTouchpad = profile.touchpads[GCInputDualShockTouchpadTwo];
+            if (secondaryTouchpad != nil) {
+                [self handleControllerTouchpad:voidController touchpad:secondaryTouchpad index:1];
+            }
+            else if (profile.dpads[GCInputDualShockTouchpadTwo] != nil) {
+                [self handleControllerTouchpad:voidController touch:profile.dpads[GCInputDualShockTouchpadTwo] index:1];
+            }
         });
     }];
 }
@@ -1683,6 +1825,16 @@ double rc_expo(double x, double expo) {
                 useLegacyPausedHandler = NO;
             }
         }
+        if (@available(iOS 16.0, tvOS 16.0, *)) {
+            if (controller.extendedGamepad == nil &&
+                controller.physicalInputProfile.buttons[GCInputButtonMenu] != nil) {
+                // The generic-profile listener sends Menu as Start. Avoid sending a
+                // second, synthetic Start press through the legacy pause handler.
+                useLegacyPausedHandler = NO;
+            }
+        }
+
+        controller.controllerPausedHandler = NULL;
         
         if (useLegacyPausedHandler) {
             controller.controllerPausedHandler = ^(GCController *controller) {
@@ -1966,6 +2118,7 @@ double rc_expo(double x, double expo) {
 -(VoidController* )assignController:(GCController*)controller {
     NSLog(@"run assignController");
 
+    // Callers hold _controllerStreamLock so slot allocation cannot race event masks.
     bool newGCControllerArrival = ![ControllerUtil.activeStreamingGCControllers containsObject:controller];
     
     if(!newGCControllerArrival){
@@ -2080,6 +2233,7 @@ double rc_expo(double x, double expo) {
 }
 
 - (void)assignControllers{
+    [_controllerStreamLock lock];
     for (GCController* controller in [GCController controllers]) {
         NSLog(@"controller count: iterating");
         
@@ -2093,10 +2247,16 @@ double rc_expo(double x, double expo) {
             // because the connection has not been established yet.play
         }
     }
+    [_controllerStreamLock unlock];
     NSLog(@"device gyro codes,update gyroMode: %d, controller count: %lu", _gyroMode, (unsigned long)_voidControllers.count);
 }
 
 - (void)updateCommonConfig:(StreamConfiguration* )streamConfig{
+    // Reconfiguration replaces controller/config state consumed by the generic
+    // input queue. Callers run on main, so profile callbacks can't enqueue more
+    // work until this barrier and the configuration update have both finished.
+    dispatch_sync(_genericControllerInputQueue, ^{});
+
     _streamConfig = streamConfig;
     _multiController = streamConfig.multiController;
     _swapABXYButtons = streamConfig.swapABXYButtons;
@@ -2116,24 +2276,26 @@ double rc_expo(double x, double expo) {
         [ControllerNavigator configureControllerMouseWith:tempSettings];
     }
     
-    _controllerGyroSwitchEnabled = oscProfile.controllerGyroSwitchMode != ControllerGyroSwitchDisabled;
-    _gyroSwitchMode = oscProfile.controllerGyroSwitchMode;
-    // _gyroSwitchMode = ControllerGyroSwitchHoldDownToActivate;
-    _controllerGyroSwitchToggle = oscProfile.controllerGyroSwitchToggle;
-    _controllerGyroSwitchHold = oscProfile.controllerGyroSwitchHold;
-    _reverseHoldButton = oscProfile.reverseGyroHoldButton;
-    _controllerGyroSwitchTogglePressed = false;
-    _controllerGyroSwitchHoldPressed = false;
+    @synchronized (self) {
+        _controllerGyroSwitchEnabled = oscProfile.controllerGyroSwitchMode != ControllerGyroSwitchDisabled;
+        _gyroSwitchMode = oscProfile.controllerGyroSwitchMode;
+        // _gyroSwitchMode = ControllerGyroSwitchHoldDownToActivate;
+        _controllerGyroSwitchToggle = oscProfile.controllerGyroSwitchToggle;
+        _controllerGyroSwitchHold = oscProfile.controllerGyroSwitchHold;
+        _reverseHoldButton = oscProfile.reverseGyroHoldButton;
+        _gyroToggleEnabled = NO;
+        _controllerGyroSwitchTogglePressedMask = 0;
+        _controllerGyroSwitchHoldPressedMask = 0;
+
+        // if(oscProfile.controllerGyroSwitchMode == ControllerGyroSwitchDisabled && ![self useMotionHandler]) _gyroEnabledFlag = false;
+        _gyroEnabledFlag = false;
+        [self->motionHandler stopMotionUpdateWithInterruptNoneGyroInput:false];
+    }
     
     stickMaxOffset = 0x7FFE;
     _leftStickMinOffset = oscProfile.physicalLeftStickMinOffset;
     _rightStickMinOffset = oscProfile.physicalRightStickMinOffset;
 
-    // if(oscProfile.controllerGyroSwitchMode == ControllerGyroSwitchDisabled && ![self useMotionHandler]) _gyroEnabledFlag = false;
-    _gyroEnabledFlag = false;
-    
-    // if(![self useMotionHandler]) [self->motionHandler stopMotionUpdateWithInterruptNoneGyroInput:false];
-    [self->motionHandler stopMotionUpdateWithInterruptNoneGyroInput:false];
 }
 
 - (void)resetGyroInputForController:(VoidController* )voidController{
@@ -2154,9 +2316,8 @@ double rc_expo(double x, double expo) {
 - (void)updateControllerSupport:(StreamConfiguration*)streamConfig delegate:(id<ControllerSupportDelegate>)delegate {
     NSLog(@"update config call");
     
-    _gyroMode = streamConfig.gyroMode;
-
     [self updateCommonConfig:streamConfig];
+    _gyroMode = streamConfig.gyroMode;
     
     Log(LOG_I, @"Number of supported controllers connected: %d", [ControllerSupport getGamepadCount]);
     Log(LOG_I, @"Multi-controller: %d", _multiController);
@@ -2179,12 +2340,17 @@ double rc_expo(double x, double expo) {
     self = [super init];
     if (self) {
         VLSharedControllerSupport = self;
+        atomic_init(&_gyroEnabledFlag, false);
     }
     
     NSLog(@"controller support init");
         
     _delegate = delegate;
     _controllerStreamLock = [[NSLock alloc] init];
+    dispatch_queue_attr_t inputQueueAttributes = dispatch_queue_attr_make_with_qos_class(
+        DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INTERACTIVE, 0);
+    _genericControllerInputQueue = dispatch_queue_create(
+        "com.voidlink.generic-controller-input", inputQueueAttributes);
     _voidControllers = [[NSMutableDictionary alloc] init];
     [ControllerUtil.activeStreamingGCControllers removeAllObjects];
     _controllerNumbers = 0;
@@ -2211,14 +2377,16 @@ double rc_expo(double x, double expo) {
     }
     
     //[self->_activeGCControllers addObject:controller];
+    [self->_controllerStreamLock lock];
     VoidController* voidController = [self assignController:controller];
-        if (voidController) {
-            // Register callbacks on the new controller
-            [self registerControllerCallbacks:controller];
-            
-            // Report the controller arrival to the host if we're connected
-            [self reportControllerArrival:voidController];
-            
+    if (voidController) {
+        // Register callbacks and announce the slot atomically with respect to input events.
+        [self registerControllerCallbacks:controller];
+        [self reportControllerArrivalLocked:voidController];
+    }
+    [self->_controllerStreamLock unlock];
+
+    if (voidController) {
             // Re-evaluate the on-screen control mode
             //[self updateAutoOnScreenControlMode];
             if((self->_gyroMode == GyroModeAuto && [self externalControllersHaveGyro]) || self->_gyroMode == AlwaysController){
@@ -2242,14 +2410,42 @@ double rc_expo(double x, double expo) {
         }
         
         [self unregisterControllerCallbacks:controller];
+        // Finish already-captured generic input before its player slot can be reused.
+        dispatch_sync(self->_genericControllerInputQueue, ^{});
+
+        VoidController* voidController = [self->_voidControllers objectForKey:@(controller.playerIndex)];
+        if (voidController && controller.extendedGamepad == nil) {
+            if (voidController.playerIndex == 0) {
+                [self->motionHandler resetPhysicalStickInputs];
+            }
+
+            // Release contacts while the controller slot is still active on the host.
+            [self releaseControllerTouchpadContacts:voidController];
+
+            // The host expects a zeroed event when a controller slot is removed.
+            // Clear its cached state before updateFinished reports the new mask.
+            @synchronized (voidController) {
+                voidController.lastButtonFlags = 0;
+                voidController.emulatingButtonFlags = 0;
+                voidController.lastLeftTrigger = 0;
+                voidController.lastRightTrigger = 0;
+                voidController.lastLeftStickX = 0;
+                voidController.lastLeftStickY = 0;
+                voidController.lastRightStickX = 0;
+                voidController.lastRightStickY = 0;
+            }
+        }
+
+        [self resetGyroSwitchForPlayerIndex:controller.playerIndex];
         
         if([ControllerUtil.activeStreamingGCControllers containsObject:controller]){
             [ControllerUtil.activeStreamingGCControllers removeObject:controller];
+            [self->_controllerStreamLock lock];
             self->_controllerNumbers &= ~(1 << controller.playerIndex);
+            [self->_controllerStreamLock unlock];
         }
         Log(LOG_I, @"Unassigning controller index: %ld", (long)controller.playerIndex);
-        
-        VoidController* voidController = [self->_voidControllers objectForKey:[NSNumber numberWithInteger:controller.playerIndex]];
+
         if (voidController) {
 #if !TARGET_OS_TV
             if ([self->_kishiRumbler isTargetController:controller]) {
@@ -2422,7 +2618,10 @@ double rc_expo(double x, double expo) {
     // Stop all timers to ensure a clean slate before applying the new setting.
     [self stopTimerForAllControllers];
 
-    _gyroEnabledFlag = [self psGyroEnabledInSetting];
+    @synchronized (self) {
+        _gyroEnabledFlag = [self psGyroEnabledInSetting];
+        _gyroToggleEnabled = _gyroEnabledFlag;
+    }
     switch(_gyroMode) {
         case AlwaysController:
             // Activate timers only for physical controllers.
@@ -2461,6 +2660,10 @@ double rc_expo(double x, double expo) {
 
 -(void) cleanup
 {
+    @synchronized (self) {
+        _isCleaningUp = YES;
+    }
+
     [ControllerUtil stopAllDualSenseHaptics];
 #if !TARGET_OS_TV
     [_gameSirG8MFiRumbler invalidate];
@@ -2484,8 +2687,22 @@ double rc_expo(double x, double expo) {
     _mouseDisconnectObserver = nil;
     _keyboardConnectObserver = nil;
     _keyboardDisconnectObserver = nil;
+
+    for (GCController* controller in [GCController controllers]) {
+        if ([ControllerSupport isSupportedGamepad:controller]) {
+            [self unregisterControllerCallbacks:controller];
+        }
+    }
+    // Drain captured generic input before releasing its controller state.
+    dispatch_sync(_genericControllerInputQueue, ^{});
+    @synchronized (self) {
+        _controllerGyroSwitchTogglePressedMask = 0;
+        _controllerGyroSwitchHoldPressedMask = 0;
+    }
     
+    [_controllerStreamLock lock];
     _controllerNumbers = 0;
+    [_controllerStreamLock unlock];
     
     [self stopTimerForController:_oscController];
     for (VoidController* controller in [_voidControllers allValues]) {
@@ -2500,12 +2717,6 @@ double rc_expo(double x, double expo) {
         [self cleanupControllerMotion:_oscController];
         [_oscController.motionManager stopDeviceMotionUpdates];
     #endif
-    
-    for (GCController* controller in [GCController controllers]) {
-        if ([ControllerSupport isSupportedGamepad:controller]) {
-            [self unregisterControllerCallbacks:controller];
-        }
-    }
     
     if (@available(iOS 14.0, tvOS 14.0, *)) {
         for (GCMouse* mouse in [GCMouse mice]) {

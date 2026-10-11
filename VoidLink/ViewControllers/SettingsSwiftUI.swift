@@ -4913,7 +4913,7 @@ final class SettingsSession: NSObject, ObservableObject {
 
     private func presentGyroSwitchCapture(for mode: ControllerGyroSwitchMode) {
         guard let presenter = presentingController else { return }
-        guard let controller = GCController.controllers().first(where: { $0.extendedGamepad != nil }) else {
+        guard let controller = GCController.controllers().first(where: { ControllerSupport.isSupportedGamepad($0) }) else {
             let persistedMode = Int(OSCProfilesManager.sharedManager(CGRect.zero).getSelectedProfile().controllerGyroSwitchMode)
             AlertControllerUtil.showAlert(
                 in: presenter,
@@ -4945,6 +4945,7 @@ final class SettingsSession: NSObject, ObservableObject {
             ? "Disable press-toggle button"
             : "Disable hold-down button").localized
         var switchButtonCaptured = false
+        var captureIsActive = true
         AlertControllerUtil.showAlert(
             in: presenter,
             title: "Gyro button on controller".localized,
@@ -4957,21 +4958,11 @@ final class SettingsSession: NSObject, ObservableObject {
                 let confirmAction = AlertControllerUtil.alertController.actions.first
                 self.capturedGyroSwitchController = controller
                 ControllerUtil.stopListeningPrimaryController(stopListenToRadialMenuButton: true)
-                ControllerUtil.listen(controller: controller, swapABXY: false) { [weak self] elementDict, gamepad, _ in
-                    var capturedRawValue: Int32?
-                    for case let key as NSNumber in elementDict.allKeys {
-                        guard let button = elementDict[key] as? GCControllerButtonInput, button.isPressed else { continue }
-                        capturedRawValue = key.int32Value
-                        break
-                    }
-                    guard let capturedRawValue else { return }
+                let captureButton: (Int32) -> Void = { [weak self] capturedRawValue in
                     DispatchQueue.main.async {
-                        guard let self, !switchButtonCaptured else { return }
-                        let currentNavControls = ControllerNavigator.uiNavigationDelegate?.getNavigationElements().map { $0.control }
-                        let disableTapped = currentNavControls?.contains(ControllerElement(rawValue: capturedRawValue) ?? .null) == true
-                        switchButtonCaptured = !disableTapped
-                        self.capturedGyroSwitchController = controller
-                        gamepad.valueChangedHandler = nil
+                        guard captureIsActive, let self, !switchButtonCaptured else { return }
+                        guard !ControllerNavigator.isNavigationControl(capturedRawValue) else { return }
+                        switchButtonCaptured = true
                         let manager = OSCProfilesManager.sharedManager(CGRect.zero)
                         let profile = manager.getSelectedProfile()
                         if isToggle {
@@ -4980,6 +4971,7 @@ final class SettingsSession: NSObject, ObservableObject {
                             profile.controllerGyroSwitchHold = capturedRawValue
                         }
                         manager.replaceSelectedProfile(with: profile, overwriteDefault: true)
+                        captureIsActive = false
                         AlertControllerUtil.alertController.message = "Finished".localized
                         AlertControllerUtil.alertController.actions.forEach { $0.isEnabled = false }
                         confirmAction?.setValue("OK".localized, forKey: "title")
@@ -4990,8 +4982,24 @@ final class SettingsSession: NSObject, ObservableObject {
                         }
                     }
                 }
+
+                if controller.extendedGamepad == nil {
+                    if #available(iOS 16.0, tvOS 16.0, *) {
+                        ControllerUtil.listenForPhysicalProfileButtonCapture(controller: controller, handler: captureButton)
+                    }
+                } else {
+                    ControllerUtil.listen(controller: controller, swapABXY: false) { elementDict, gamepad, _ in
+                        for case let key as NSNumber in elementDict.allKeys {
+                            guard let button = elementDict[key] as? GCControllerButtonInput, button.isPressed else { continue }
+                            gamepad.valueChangedHandler = nil
+                            captureButton(key.int32Value)
+                            break
+                        }
+                    }
+                }
             },
             completion: { [weak self] in
+                captureIsActive = false
                 guard let self else { return }
                 let manager = OSCProfilesManager.sharedManager(CGRect.zero)
                 let profile = manager.getSelectedProfile()
@@ -5009,7 +5017,13 @@ final class SettingsSession: NSObject, ObservableObject {
     }
 
     private func stopGyroSwitchCapture() {
-        capturedGyroSwitchController?.extendedGamepad?.valueChangedHandler = nil
+        if let controller = capturedGyroSwitchController {
+            if controller.extendedGamepad == nil, #available(iOS 16.0, tvOS 16.0, *) {
+                ControllerUtil.stopListeningForPhysicalProfileButtonCapture(controller: controller)
+            } else {
+                controller.extendedGamepad?.valueChangedHandler = nil
+            }
+        }
         capturedGyroSwitchController = nil
         ControllerNavigator.restartListening()
     }

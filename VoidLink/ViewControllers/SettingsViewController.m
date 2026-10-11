@@ -3563,6 +3563,8 @@ BOOL isCustomResolution(int resolutionSelected) {
     }
     else{
         __block bool switchButtonCaptured = false;
+        __block bool genericCaptureActive = false;
+        __block bool captureIsActive = true;
         oscProfile = [oscProfileMan getSelectedProfile];
 
         [AlertControllerUtil showAlertIn:self
@@ -3575,10 +3577,41 @@ BOOL isCustomResolution(int resolutionSelected) {
             
             UIAlertAction* confirmAction = AlertControllerUtil.alertController.actions.firstObject;
 
-            self->capturedController = [GCController controllers].firstObject;
+            self->capturedController = nil;
+            for (GCController* controller in [GCController controllers]) {
+                if ([ControllerSupport isSupportedGamepad:controller]) {
+                    self->capturedController = controller;
+                    break;
+                }
+            }
             if(self->capturedController){
                 __weak typeof(self) weakSelf = self;
-                                
+                if (self->capturedController.extendedGamepad == nil) {
+                    if (@available(iOS 16.0, tvOS 16.0, *)) {
+                        genericCaptureActive = true;
+                        [ControllerUtil stopListeningPrimaryControllerWithStopListenToRadialMenuButton:true];
+                        [ControllerUtil listenForPhysicalProfileButtonCaptureWithController:self->capturedController handler:^(int32_t buttonFlag) {
+                            dispatch_async(dispatch_get_main_queue(), ^{
+                                __strong typeof(weakSelf) self = weakSelf;
+                                if (!captureIsActive || !self || switchButtonCaptured) return;
+                                if ([ControllerNavigator isNavigationControl:buttonFlag]) return;
+                                if(sender.selectedSegmentIndex == ControllerGyroSwitchPressToToggle) self->oscProfile.controllerGyroSwitchToggle = buttonFlag;
+                                if(sender.selectedSegmentIndex == ControllerGyroSwitchHoldDown) self->oscProfile.controllerGyroSwitchHold = buttonFlag;
+                                switchButtonCaptured = true;
+                                captureIsActive = false;
+                                AlertControllerUtil.alertController.message = [LocalizationHelper localizedStringForKey:@"Finished"];
+                                for(UIAlertAction* action in AlertControllerUtil.alertController.actions) action.enabled = false;
+                                if(confirmAction) [confirmAction setValue:[LocalizationHelper localizedStringForKey:@"OK"] forKey:@"title"];
+                                [self->oscProfileMan replaceSelectedProfileWith:self->oscProfile overwriteDefault:true];
+                                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1*NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+                                    [AlertControllerUtil.alertController dismissViewControllerAnimated:NO completion:nil];
+                                    if(AlertControllerUtil.completion) AlertControllerUtil.completion();
+                                });
+                            });
+                        }];
+                    }
+                }
+                else {
                 [ControllerUtil listenWithController:self->capturedController swapABXY:false handler:^(NSDictionary * elementDict, GCExtendedGamepad * gamepad, GCControllerElement * element) {
                     __strong typeof(weakSelf) self = weakSelf;
                     if (!self) return;
@@ -3608,6 +3641,7 @@ BOOL isCustomResolution(int resolutionSelected) {
                         }
                     }
                 }];
+                }
             }
             else{
                 [AlertControllerUtil.alertController dismissViewControllerAnimated:NO completion:^{
@@ -3631,6 +3665,7 @@ BOOL isCustomResolution(int resolutionSelected) {
             }
         }
                                    completion:^{
+            captureIsActive = false;
             if(!switchButtonCaptured){
                 if(sender.selectedSegmentIndex == ControllerGyroSwitchPressToToggle) self->oscProfile.controllerGyroSwitchToggle = ControllerElementNull;
                 if(sender.selectedSegmentIndex == ControllerGyroSwitchHoldDown) self->oscProfile.controllerGyroSwitchHold = ControllerElementNull;
@@ -3653,6 +3688,13 @@ BOOL isCustomResolution(int resolutionSelected) {
             }
             
             [self setHidden:sender.selectedSegmentIndex==ControllerGyroSwitchDisabled forStack:self.reverseHoldButtonStack];
+
+            if(genericCaptureActive && self->capturedController) {
+                if (@available(iOS 16.0, tvOS 16.0, *)) {
+                    [ControllerUtil stopListeningForPhysicalProfileButtonCaptureWithController:self->capturedController];
+                }
+                [ControllerNavigator restartListening];
+            }
             
             if(self->capturedController && self->capturedController.extendedGamepad) self->capturedController.extendedGamepad.valueChangedHandler = nil;
         }];

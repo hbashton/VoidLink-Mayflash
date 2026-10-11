@@ -1166,29 +1166,61 @@ import UIKit
         controller: GCController,
         swapABXY: Bool,
         handler: @escaping (_ elementDict: NSDictionary,
-                            _ profile: GCPhysicalInputProfile,
-                            _ element: GCControllerElement) -> Void
+                            _ profile: GCPhysicalInputProfile) -> Void
     ) {
         let profile = controller.physicalInputProfile
         let mapping = buildPhysicalMapping(for: profile, swapABXY: swapABXY)
-        var elementMap: [NSNumber: GCControllerElement] = [:]
-        for (element, input) in mapping {
-            elementMap[NSNumber(value: element.rawValue)] = input
-        }
-        let elementDict = elementMap as NSDictionary
 
         if controller === primaryGCController {
             primaryControllerElementMap = mapping
         }
 
-        profile.valueDidChangeHandler = { [weak controller] changedProfile, element in
+        // Keep profile callbacks on main with the connection and disconnection observers.
+        controller.handlerQueue = DispatchQueue.main
+        profile.valueDidChangeHandler = { [weak controller] changedProfile, _ in
             guard let controller else { return }
-            handler(elementDict, changedProfile, element)
+            let snapshot = changedProfile.capture()
+            let snapshotMapping = buildPhysicalMapping(for: snapshot, swapABXY: swapABXY)
+            var snapshotElementMap: [NSNumber: GCControllerElement] = [:]
+            for (element, input) in snapshotMapping {
+                snapshotElementMap[NSNumber(value: element.rawValue)] = input
+            }
+            handler(snapshotElementMap as NSDictionary, snapshot)
             if controller.playerIndex == .index1 {
                 GamepadOverlayStateCenter.shared.publish(
-                    snapshot: GamepadOverlaySnapshot(profile: changedProfile)
+                    snapshot: GamepadOverlaySnapshot(profile: snapshot)
                 )
             }
+        }
+    }
+
+    @available(iOS 16.0, tvOS 16.0, *)
+    @objc(listenForPhysicalProfileButtonCaptureWithController:handler:)
+    static func listenForPhysicalProfileButtonCapture(
+        controller: GCController,
+        handler: @escaping (Int32) -> Void
+    ) {
+        // Use per-button handlers so a temporary settings capture does not replace
+        // ControllerSupport's physicalInputProfile.valueDidChangeHandler.
+        controller.handlerQueue = DispatchQueue.main
+        let mapping = buildPhysicalMapping(for: controller.physicalInputProfile, swapABXY: false)
+        for (element, input) in mapping {
+            guard let button = input as? GCControllerButtonInput else { continue }
+            let rawValue = element.rawValue
+            button.pressedChangedHandler = { _, _, pressed in
+                if pressed {
+                    handler(rawValue)
+                }
+            }
+        }
+    }
+
+    @available(iOS 16.0, tvOS 16.0, *)
+    @objc(stopListeningForPhysicalProfileButtonCaptureWithController:)
+    static func stopListeningForPhysicalProfileButtonCapture(controller: GCController) {
+        let mapping = buildPhysicalMapping(for: controller.physicalInputProfile, swapABXY: false)
+        for input in mapping.values {
+            (input as? GCControllerButtonInput)?.pressedChangedHandler = nil
         }
     }
 
@@ -1526,9 +1558,7 @@ import UIKit
         }
         primaryControllerAxisStates.removeAll()
         primaryGCController?.extendedGamepad?.valueChangedHandler = nil
-        if #available(iOS 16.0, tvOS 16.0, *) {
-            primaryGCController?.physicalInputProfile.valueDidChangeHandler = nil
-        }
+        // ControllerSupport owns physicalInputProfile.valueDidChangeHandler for streaming.
     }
     
     @objc static func listenPrimaryControllerButton(_ button: ControllerElement, ignoreSwapABXY: Bool = true, handler: @escaping (_ pressed: Bool) -> Void){

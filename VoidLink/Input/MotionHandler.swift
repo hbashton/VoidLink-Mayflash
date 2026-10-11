@@ -46,14 +46,28 @@ private typealias VLDeviceMotion = CMDeviceMotion
     }
     
     @objc public func mixPhysicalRightStickAndGyroInput(x: CGFloat, y: CGFloat) {
+        physicalStickInputLock.lock()
         rightStickPhysicalInputX = synthesizePhysicalStick ? x : 0
         rightStickPhysicalInputY = synthesizePhysicalStick ? y : 0
+        physicalStickInputLock.unlock()
     }
     
     @objc public func mixPhysicalLeftStickAndGyroInput(x: CGFloat, y: CGFloat) {
         // rollIntegral = 0
+        physicalStickInputLock.lock()
         leftStickPhysicalInputX = synthesizePhysicalStick ? x : 0
         leftStickPhysicalInputY = synthesizePhysicalStick ? y : 0
+        physicalStickInputLock.unlock()
+    }
+
+    @objc public func resetPhysicalStickInputs() {
+        physicalStickInputLock.lock()
+        rightStickPhysicalInputX = 0
+        rightStickPhysicalInputY = 0
+        leftStickPhysicalInputX = 0
+        leftStickPhysicalInputY = 0
+        physicalStickInputLock.unlock()
+        clearGyroInput(interruptNonGyroInput: false)
     }
 
     public func gyroMixInputStarted() -> Bool {
@@ -68,7 +82,9 @@ private typealias VLDeviceMotion = CMDeviceMotion
         sharedInstance.useBuiltinGyro = profile.useBuiltinGyro && !PublicUtils.isTVOS && !PublicUtils.isRunningOnMacAsiPadApp
         sharedInstance.swapYawAndRoll = profile.swapYawAndRoll
         sharedInstance.mapGyroTo = profile.mapGyroTo
+        sharedInstance.physicalStickInputLock.lock()
         sharedInstance.synthesizePhysicalStick = profile.synthesizePhysicalStick
+        sharedInstance.physicalStickInputLock.unlock()
         sharedInstance.rollToLeftStick = profile.rollToLeftStick
         sharedInstance.yawPitchToRightStick = profile.yawPitchToRightStick
         sharedInstance.sensitvityYaw = profile.gyroSensitivityYaw
@@ -79,7 +95,19 @@ private typealias VLDeviceMotion = CMDeviceMotion
         return sharedInstance
     }
 
-    @objc public var motionControlStarted: Bool = false
+    private var _motionControlStarted: Bool = false
+    @objc public var motionControlStarted: Bool {
+        get {
+            physicalStickInputLock.lock()
+            defer { physicalStickInputLock.unlock() }
+            return _motionControlStarted
+        }
+        set {
+            physicalStickInputLock.lock()
+            _motionControlStarted = newValue
+            physicalStickInputLock.unlock()
+        }
+    }
     @objc var useBuiltinGyro: Bool = true
     @objc var swapYawAndRoll: Bool = false
     private var motionIsWorking: Bool = false
@@ -139,10 +167,17 @@ private typealias VLDeviceMotion = CMDeviceMotion
     
     private var rightStickPhysicalInputX:Double = 0
     private var rightStickPhysicalInputY:Double = 0
+    private let physicalStickInputLock = NSLock()
     public var gyroToStickOffset:CGVector = CGVector(dx: 0, dy: 0)
     
     private var leftStickPhysicalInputX:Double = 0
     private var leftStickPhysicalInputY:Double = 0
+
+    private func physicalStickInputSnapshot() -> (rightX: Double, rightY: Double, leftX: Double, leftY: Double) {
+        physicalStickInputLock.lock()
+        defer { physicalStickInputLock.unlock() }
+        return (rightStickPhysicalInputX, rightStickPhysicalInputY, leftStickPhysicalInputX, leftStickPhysicalInputY)
+    }
 
     var updateInterval: TimeInterval = 1.0 / 120.0 {
         didSet {
@@ -293,6 +328,7 @@ private typealias VLDeviceMotion = CMDeviceMotion
     }
 
     private func handleMotionData(deviceMotion: VLDeviceMotion? = nil, gcMotion:GCMotion? = nil) {
+        let physicalStickInputs = physicalStickInputSnapshot()
         var x:Double = 0
         var y:Double = 0
         var z:Double = 0
@@ -419,11 +455,11 @@ private typealias VLDeviceMotion = CMDeviceMotion
         if mapGyroTo == MapGyroTo.mapGyroToControllerStick {
             if yawPitchToRightStick {
                 gyroToStickOffset.dx = gyroInputToStickInput(input:yawSource*sensitvityYaw*widgetYawFactor*10)
-                yaw = rightStickTouchInputX + rightStickPhysicalInputX + gyroToStickOffset.dx
+                yaw = rightStickTouchInputX + physicalStickInputs.rightX + gyroToStickOffset.dx
                 yaw = self.clampStickInput(input: yaw)
                 
                 gyroToStickOffset.dy = -gyroInputToStickInput(input:pitchSource*sensitvityPitch*widgetPitchFactor*10)
-                pitch = rightStickTouchInputY + rightStickPhysicalInputY + gyroToStickOffset.dy
+                pitch = rightStickTouchInputY + physicalStickInputs.rightY + gyroToStickOffset.dy
                 pitch = self.clampStickInput(input: pitch)
                 
                 let offsetVector = ControllerUtil.compensated(offsetVector: CGVector(dx: yaw, dy: pitch), minOffset: gyroToStickMinOffset)
@@ -435,8 +471,8 @@ private typealias VLDeviceMotion = CMDeviceMotion
                                 
                 leftStickMotion = self.clampStickInput(input: useBuiltinGyro ? -stickMaxOffset*(gravityYOffset/Double.pi)*3*sensitvityRoll*widgetRollFactor :                 leftStickMotion + roll)
 
-                let mixedLeftStickOffsetX = self.clampStickInput(input: leftStickMotion+leftStickTouchInputX+leftStickPhysicalInputX)
-                let mixedLeftStickOffsetY = self.clampStickInput(input: leftStickTouchInputY+leftStickPhysicalInputY)
+                let mixedLeftStickOffsetX = self.clampStickInput(input: leftStickMotion+leftStickTouchInputX+physicalStickInputs.leftX)
+                let mixedLeftStickOffsetY = self.clampStickInput(input: leftStickTouchInputY+physicalStickInputs.leftY)
 
                 let offsetVector = ControllerUtil.compensated(offsetVector: CGVector(dx: mixedLeftStickOffsetX, dy: mixedLeftStickOffsetY), minOffset: gyroToStickMinOffset, circulate: true)
                 
@@ -447,18 +483,19 @@ private typealias VLDeviceMotion = CMDeviceMotion
     
     private func clearGyroInput(interruptNonGyroInput:Bool){
         guard ControllerUtil.gamepadArrivalReported else { return }
+        let physicalStickInputs = physicalStickInputSnapshot()
         
         if yawPitchToRightStick{
-            let clearX = rightStickPhysicalInputX+rightStickTouchInputX-yawBias
-            let clearY = rightStickPhysicalInputY+rightStickTouchInputY-pitchBias
+            let clearX = physicalStickInputs.rightX+rightStickTouchInputX-yawBias
+            let clearY = physicalStickInputs.rightY+rightStickTouchInputY-pitchBias
             let clearVector = ControllerUtil.circulated(offsetVector: CGVector(dx: clearX, dy: clearY))
             
             onScreenControls?.sendRightStickTouchPadEvent(clearVector.dx, clearVector.dy)
         }
         if rollToLeftStick{
             leftStickMotion = leftStickTouchInputX
-            let clearX = leftStickPhysicalInputX+leftStickTouchInputX-rollBias
-            let clearY = leftStickPhysicalInputY+leftStickTouchInputY
+            let clearX = physicalStickInputs.leftX+leftStickTouchInputX-rollBias
+            let clearY = leftStickTouchInputY+physicalStickInputs.leftY
             let clearVector = ControllerUtil.circulated(offsetVector: CGVector(dx: clearX, dy: clearY))
 
             onScreenControls?.sendLeftStickTouchPadEvent(clearVector.dx,clearVector.dy)

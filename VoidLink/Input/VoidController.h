@@ -22,6 +22,7 @@ typedef NS_ENUM(uint8_t, ControllerHardware);
 typedef struct {
     float lastX;
     float lastY;
+    BOOL isActive;
 } controller_touch_context_t;
 
 typedef NS_ENUM(NSInteger, ControllerDeviceBatteryState) {

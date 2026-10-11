@@ -246,6 +246,12 @@ final class ControllerNavigator: NSObject {
             }
         }
     }
+
+    @objc(isNavigationControl:)
+    static func isNavigationControl(_ rawValue: Int32) -> Bool {
+        guard let control = ControllerElement(rawValue: rawValue) else { return false }
+        return uiNavigationDelegate?.getNavigationElements().contains { $0.control == control } ?? false
+    }
     
     @objc static var localRadialMenuButton: ControllerElement = .leftShoulder
     @objc static var customPositionForLocalRadialMenuButton: ControllerElementPosition = .left

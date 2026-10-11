@@ -27,6 +27,7 @@
 @property (readonly) bool shallDisableGyroHotSwitch;
 
 +(nullable ControllerSupport*) sharedInstance;
++(bool) isSupportedGamepad:(GCController*)controller;
 
 -(id) initWithConfig:(StreamConfiguration*)streamConfig delegate:(id<ControllerSupportDelegate>)delegate;
 -(void) connectionEstablished;
