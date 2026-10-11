@@ -29,7 +29,7 @@ static __weak ControllerSupport *VLSharedControllerSupport = nil;
 @interface ControllerSupport()
 
 @property (assign,nonatomic) bool shallDisableGyroHotSwitch;
-- (void) listenToGenericGCController:(GCController*)controller API_AVAILABLE(ios(14.0), tvos(14.0));
+- (void) listenToGenericGCController:(GCController*)controller API_AVAILABLE(ios(16.0), tvos(16.0));
 
 @end
 
@@ -942,6 +942,8 @@ static __weak ControllerSupport *VLSharedControllerSupport = nil;
             for (GCControllerElement* element in controller.physicalInputProfile.allElements) {
                 element.preferredSystemGestureState = GCSystemGestureStateEnabled;
             }
+        }
+        if (@available(iOS 16.0, tvOS 16.0, *)) {
             controller.physicalInputProfile.valueDidChangeHandler = NULL;
         }
 
@@ -1063,7 +1065,7 @@ static __weak ControllerSupport *VLSharedControllerSupport = nil;
         // Start is always present
         supportedButtonFlags |= PLAY_FLAG;
         
-        if (@available(iOS 14.0, tvOS 14.0, *)) {
+        if (@available(iOS 16.0, tvOS 16.0, *)) {
             if (controller.extendedGamepad == nil) {
                 GCPhysicalInputProfile *profile = controller.physicalInputProfile;
                 NSDictionary<NSString *, GCControllerButtonInput *> *buttons = profile.buttons;
@@ -1544,7 +1546,7 @@ double rc_expo(double x, double expo) {
     }];
 }
 
-- (void) listenToGenericGCController:(GCController*) controller API_AVAILABLE(ios(14.0), tvos(14.0)) {
+- (void) listenToGenericGCController:(GCController*) controller API_AVAILABLE(ios(16.0), tvos(16.0)) {
     [ControllerUtil listenPhysicalProfileWithController:controller
                                             swapABXY:self->_swapABXYButtons
                                               handler:^(NSDictionary *elementDict, GCPhysicalInputProfile *profile, GCControllerElement *changedElement) {
@@ -1715,7 +1717,7 @@ double rc_expo(double x, double expo) {
             else if (controller.extendedGamepad != nil) {
                 [self listenToGCController:controller];
             }
-            else if (@available(iOS 14.0, tvOS 14.0, *)) {
+            else if (@available(iOS 16.0, tvOS 16.0, *)) {
                 [self listenToGenericGCController:controller];
             }
         }
@@ -2012,7 +2014,7 @@ double rc_expo(double x, double expo) {
         return true;
     }
 
-    if (@available(iOS 14.0, tvOS 14.0, *)) {
+    if (@available(iOS 16.0, tvOS 16.0, *)) {
         GCPhysicalInputProfile *profile = controller.physicalInputProfile;
         BOOL hasFaceButton = profile.buttons[GCInputButtonA] != nil
             || profile.buttons[GCInputButtonB] != nil
