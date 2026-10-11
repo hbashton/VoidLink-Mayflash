@@ -756,8 +756,9 @@ final class ControllerNavigator: NSObject {
         // During a stream, ControllerSupport routes this input from the actual
         // Sunshine P1 pad. The fixed app-primary listener may belong to another pad.
         if mainFrameVC.isStreaming() { return }
-        ControllerUtil.listenPrimaryControllerButton(radialMenuButton) { pressed in
-            handleRadialMenuButtonChange(pressed, mainFrameVC: mainFrameVC)
+        let sourceButton = radialMenuButton
+        ControllerUtil.listenPrimaryControllerButton(sourceButton) { pressed in
+            handleRadialMenuButtonChange(pressed, mainFrameVC: mainFrameVC, sourceButton: sourceButton)
         }
     }
 
@@ -770,10 +771,14 @@ final class ControllerNavigator: NSObject {
         }
         guard let mainFrameVC = radialMenuDelegate as? MainFrameViewController,
               mainFrameVC.isStreaming() else { return }
-        handleRadialMenuButtonChange(pressed, mainFrameVC: mainFrameVC)
+        handleRadialMenuButtonChange(pressed, mainFrameVC: mainFrameVC, sourceButton: .start)
     }
 
-    private static func handleRadialMenuButtonChange(_ pressed: Bool, mainFrameVC: MainFrameViewController) {
+    private static func handleRadialMenuButtonChange(
+        _ pressed: Bool,
+        mainFrameVC: MainFrameViewController,
+        sourceButton: ControllerElement
+    ) {
         // The streaming control is logical Start even if a pre-stream local
         // controller left the shared display state on RT.
         if mainFrameVC.isStreaming() {
@@ -782,6 +787,10 @@ final class ControllerNavigator: NSObject {
         ControllerDiagnostics.recordEvent("radial_menu_button_change", fields: [
             "pressed": pressed,
             "button": String(describing: radialMenuButton),
+            "source_button": String(describing: sourceButton),
+            "source_button_raw": sourceButton.rawValue,
+            "configured_menu_button_raw": radialMenuButton.rawValue,
+            "source_vendor": ControllerUtil.primaryGCController?.vendorName ?? "unknown",
             "streaming": mainFrameVC.isStreaming(),
             "streaming_settings_open": mainFrameVC.settingsExpandedInStreamView
         ])

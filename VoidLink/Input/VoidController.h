@@ -87,8 +87,11 @@ typedef NS_ENUM(NSInteger, ControllerDeviceBatteryState) {
 @property (nonatomic)                   NSUInteger diagnosticInputSnapshotsProcessed;
 @property (nonatomic)                   NSUInteger diagnosticInputPacketsSent;
 @property (nonatomic)                   NSUInteger diagnosticArrivalAttempts;
+@property (nonatomic, strong, nullable)   NSMutableDictionary<NSString *, NSNumber *> *diagnosticPhysicalButtonStates;
+@property (nonatomic)                   BOOL diagnosticHadMeaningfulPhysicalInput;
 @property (nonatomic)                   CFTimeInterval diagnosticLastCallbackLogTime;
 @property (nonatomic)                   CFTimeInterval diagnosticLastWorkerLogTime;
+@property (nonatomic)                   CFTimeInterval diagnosticLastMeaningfulStateLogTime;
 @property (nonatomic)                   CFTimeInterval diagnosticCurrentSnapshotCapturedAt;
 @property (nonatomic)                   CFTimeInterval diagnosticLastSendLogTime;
 @property (nonatomic)                   CFTimeInterval diagnosticLastArrivalLogTime;

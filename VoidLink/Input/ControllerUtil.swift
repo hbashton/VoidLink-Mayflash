@@ -1170,22 +1170,48 @@ import UIKit
     ) {
         let profile = controller.physicalInputProfile
         let mapping = buildPhysicalMapping(for: profile, swapABXY: swapABXY)
+        var elementNamesByIdentity: [ObjectIdentifier: String] = [:]
+        for (name, element) in profile.elements {
+            elementNamesByIdentity[ObjectIdentifier(element)] = name
+        }
+        let logicalElementNames: [(ControllerElement, String)] = mapping.compactMap { logicalElement, physicalElement in
+            guard let name = elementNamesByIdentity[ObjectIdentifier(physicalElement)] else { return nil }
+            return (logicalElement, name)
+        }
 
         if controller === primaryGCController {
             primaryControllerElementMap = mapping
         }
+
+        ControllerDiagnostics.recordEvent("controller_physical_mapping_built", fields: [
+            "vendor": controller.vendorName ?? "unknown",
+            "product_category": controller.productCategory ?? "unknown",
+            "profile_element_count": profile.elements.count,
+            "profile_button_names": profile.buttons.keys.sorted(),
+            "profile_dpad_names": profile.dpads.keys.sorted(),
+            "logical_mapping_count": logicalElementNames.count,
+            "logical_mappings": logicalElementNames.map { [
+                "logical_control": String(describing: $0.0),
+                "physical_element": $0.1
+            ] }
+        ])
 
         // Keep profile callbacks on main with the connection and disconnection observers.
         controller.handlerQueue = DispatchQueue.main
         profile.valueDidChangeHandler = { [weak controller] changedProfile, _ in
             guard let controller else { return }
             let snapshot = changedProfile.capture()
-            let snapshotMapping = buildPhysicalMapping(for: snapshot, swapABXY: swapABXY)
-            var snapshotElementMap: [NSNumber: GCControllerElement] = [:]
-            for (element, input) in snapshotMapping {
-                snapshotElementMap[NSNumber(value: element.rawValue)] = input
+            let liveProfile = controller.physicalInputProfile
+            var currentElementMap: [NSNumber: GCControllerElement] = [:]
+            for (logicalElement, name) in logicalElementNames {
+                if let input = snapshot.elements[name] ?? liveProfile.elements[name] {
+                    currentElementMap[NSNumber(value: logicalElement.rawValue)] = input
+                }
             }
-            handler(snapshotElementMap as NSDictionary, snapshot)
+            // Resolve the stable logical mapping by profile element name. Rebuilding
+            // the whole logical map from a captured Mayflash HID profile produced an
+            // empty map even though the live profile exposed the buttons and axes.
+            handler(currentElementMap as NSDictionary, snapshot)
             if controller.playerIndex == .index1 {
                 GamepadOverlayStateCenter.shared.publish(
                     snapshot: GamepadOverlaySnapshot(profile: snapshot)
@@ -1581,9 +1607,19 @@ import UIKit
             return
         }
         guard !streamingPrimarySelectionActive else { return }
+        let previousRadialMenuButton = ControllerNavigator.radialMenuButton
         preStreamingPrimaryGCController = primaryGCController
         streamingPrimaryGCController = nil
         streamingPrimarySelectionActive = true
+        // The app-navigation listener uses RT before a stream. The streaming
+        // listener owns Start instead, so detach the old button handler before
+        // ControllerSupport installs its stream callbacks (including when the
+        // same pad remains primary after connection).
+        stopListeningPrimaryController(stopListenToRadialMenuButton: true)
+        ControllerDiagnostics.recordEvent("controller_navigation_listeners_cleared_for_stream", fields: [
+            "previous_menu_button_raw": previousRadialMenuButton.rawValue,
+            "primary_vendor": preStreamingPrimaryGCController?.vendorName ?? "unknown"
+        ])
     }
 
     @objc static func setStreamingPrimaryController(_ controller: GCController?) {

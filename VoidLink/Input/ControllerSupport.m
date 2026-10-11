@@ -80,6 +80,16 @@ static NSDictionary<NSString *, id> *diagnosticCommonControllerFields(VoidContro
     };
 }
 
+static void recordStreamingRadialButtonSource(VoidController *controller, int buttonFlag, BOOL pressed) {
+    NSMutableDictionary<NSString *, id> *fields =
+        [NSMutableDictionary dictionaryWithDictionary:diagnosticCommonControllerFields(controller)];
+    fields[@"source_control"] = diagnosticLogicalControlName(buttonFlag);
+    fields[@"source_control_raw"] = @(buttonFlag);
+    fields[@"configured_streaming_menu_control"] = @"start";
+    fields[@"pressed"] = @(pressed);
+    [ControllerDiagnostics recordEvent:@"controller_support_streaming_radial_button" fields:fields];
+}
+
 static void recordControllerDiscovery(GCController *controller, NSString *source) {
     GCPhysicalInputProfile *profile = controller.physicalInputProfile;
     NSDictionary<NSString *, id> *fields = @{
@@ -108,11 +118,47 @@ static void recordControllerInputCallback(
 ) {
     CFTimeInterval now = CACurrentMediaTime();
     NSUInteger callbackCount;
-    BOOL shouldRecord;
+    NSMutableDictionary<NSString *, NSNumber *> *physicalButtonStates = [NSMutableDictionary dictionary];
+    NSMutableDictionary<NSString *, id> *physicalAnalogValues = [NSMutableDictionary dictionary];
+    [profile.buttons enumerateKeysAndObjectsUsingBlock:^(NSString *name, GCControllerButtonInput *button, BOOL *stop) {
+        physicalButtonStates[name] = @(button.pressed);
+        physicalAnalogValues[name] = @(button.value);
+    }];
+    [profile.dpads enumerateKeysAndObjectsUsingBlock:^(NSString *name, GCControllerDirectionPad *dpad, BOOL *stop) {
+        physicalAnalogValues[name] = @[@(dpad.xAxis.value), @(dpad.yAxis.value)];
+    }];
+
+    NSMutableArray<NSDictionary<NSString *, id> *> *physicalButtonEdges = [NSMutableArray array];
+    BOOL shouldRecord = NO;
+    NSString *captureReason = @"periodic_idle_sample";
     @synchronized (controller) {
         callbackCount = ++controller.diagnosticInputCallbacks;
-        shouldRecord = controller.diagnosticLastCallbackLogTime == 0 || now - controller.diagnosticLastCallbackLogTime >= 2.0;
+        if (controller.diagnosticPhysicalButtonStates == nil) {
+            controller.diagnosticPhysicalButtonStates = [NSMutableDictionary dictionary];
+        }
+        [physicalButtonStates enumerateKeysAndObjectsUsingBlock:^(NSString *name, NSNumber *pressed, BOOL *stop) {
+            NSNumber *previous = controller.diagnosticPhysicalButtonStates[name];
+            if ((previous != nil && previous.boolValue != pressed.boolValue) ||
+                (previous == nil && pressed.boolValue)) {
+                [physicalButtonEdges addObject:@{@"physical_control": name, @"pressed": pressed}];
+            }
+            controller.diagnosticPhysicalButtonStates[name] = pressed;
+        }];
+
+        BOOL hadMeaningfulInput = controller.diagnosticHadMeaningfulPhysicalInput;
+        controller.diagnosticHadMeaningfulPhysicalInput = meaningfulInput;
+        BOOL shouldRecordMeaningfulSample = meaningfulInput &&
+            (controller.diagnosticLastMeaningfulStateLogTime == 0 ||
+             now - controller.diagnosticLastMeaningfulStateLogTime >= 0.25);
+        shouldRecord = physicalButtonEdges.count > 0 || shouldRecordMeaningfulSample ||
+            (hadMeaningfulInput && !meaningfulInput) ||
+            controller.diagnosticLastCallbackLogTime == 0 ||
+            now - controller.diagnosticLastCallbackLogTime >= 2.0;
+        if (physicalButtonEdges.count > 0) captureReason = @"physical_button_edge";
+        else if (shouldRecordMeaningfulSample) captureReason = @"active_input_sample";
+        else if (hadMeaningfulInput && !meaningfulInput) captureReason = @"input_returned_to_neutral";
         if (shouldRecord) controller.diagnosticLastCallbackLogTime = now;
+        if (shouldRecordMeaningfulSample) controller.diagnosticLastMeaningfulStateLogTime = now;
     }
     if (!shouldRecord) return;
 
@@ -129,9 +175,20 @@ static void recordControllerInputCallback(
     NSMutableDictionary<NSString *, id> *fields = [NSMutableDictionary dictionaryWithDictionary:diagnosticCommonControllerFields(controller)];
     fields[@"source"] = source;
     fields[@"callback_count"] = @(callbackCount);
+    fields[@"capture_reason"] = captureReason;
     fields[@"meaningful_input"] = @(meaningfulInput);
     fields[@"pressed_controls"] = pressedControls;
     fields[@"mapped_controls"] = diagnosticMappedControls(elementMap, profile);
+    fields[@"logical_mapping_count"] = @(elementMap.count);
+    fields[@"physical_button_states"] = physicalButtonStates;
+    fields[@"physical_button_edges"] = physicalButtonEdges;
+    fields[@"physical_analog_values"] = physicalAnalogValues;
+    @synchronized (controller) {
+        fields[@"has_received_input"] = @(controller.hasReceivedInput);
+        fields[@"waits_for_input_before_arrival"] = @(controller.waitsForInputBeforeArrival);
+        fields[@"requires_button_release_after_order_reset"] = @(controller.requiresButtonReleaseAfterOrderReset);
+        fields[@"input_order_generation"] = @(controller.inputOrderGeneration);
+    }
     fields[@"left_stick"] = @[@(leftX), @(leftY)];
     fields[@"right_stick"] = @[@(rightX), @(rightY)];
     fields[@"triggers"] = @[@(leftTrigger), @(rightTrigger)];
@@ -2147,6 +2204,7 @@ double rc_expo(double x, double expo) {
                         }
                     }
                     if (changed) {
+                        recordStreamingRadialButtonSource(voidController, buttonFlag, pressed);
                         dispatch_async(dispatch_get_main_queue(), ^{
                             [self->_controllerStreamLock lock];
                             BOOL stillPrimary = [self voidControllerForStreamPlayerIndexLocked:0] == voidController;
@@ -2368,6 +2426,7 @@ double rc_expo(double x, double expo) {
                         }
                     }
                     if (changed) {
+                        recordStreamingRadialButtonSource(voidController, buttonFlag, pressed);
                         dispatch_async(dispatch_get_main_queue(), ^{
                             [self->_controllerStreamLock lock];
                             BOOL stillPrimary = [self voidControllerForStreamPlayerIndexLocked:0] == voidController;
