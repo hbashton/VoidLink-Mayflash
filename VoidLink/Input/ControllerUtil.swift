@@ -1181,7 +1181,7 @@ import UIKit
             primaryControllerElementMap = mapping
         }
 
-        profile.valueChangedHandler = { [weak controller] changedProfile, element in
+        profile.valueDidChangeHandler = { [weak controller] changedProfile, element in
             guard let controller else { return }
             handler(elementDict, changedProfile, element)
             if #available(iOS 13.0, tvOS 13.0, *), controller.playerIndex == .index1 {
@@ -1527,7 +1527,7 @@ import UIKit
         primaryControllerAxisStates.removeAll()
         primaryGCController?.extendedGamepad?.valueChangedHandler = nil
         if #available(iOS 14.0, tvOS 14.0, *) {
-            primaryGCController?.physicalInputProfile.valueChangedHandler = nil
+            primaryGCController?.physicalInputProfile.valueDidChangeHandler = nil
         }
     }
     
