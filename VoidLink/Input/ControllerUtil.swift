@@ -1161,6 +1161,37 @@ import UIKit
         }
     }
     
+    @available(iOS 14.0, tvOS 14.0, *)
+    @objc static func listenPhysicalProfile(
+        controller: GCController,
+        swapABXY: Bool,
+        handler: @escaping (_ elementDict: NSDictionary,
+                            _ profile: GCPhysicalInputProfile,
+                            _ element: GCControllerElement) -> Void
+    ) {
+        let profile = controller.physicalInputProfile
+        let mapping = buildPhysicalMapping(for: profile, swapABXY: swapABXY)
+        var elementMap: [NSNumber: GCControllerElement] = [:]
+        for (element, input) in mapping {
+            elementMap[NSNumber(value: element.rawValue)] = input
+        }
+        let elementDict = elementMap as NSDictionary
+
+        if controller === primaryGCController {
+            primaryControllerElementMap = mapping
+        }
+
+        profile.valueChangedHandler = { [weak controller] changedProfile, element in
+            guard let controller else { return }
+            handler(elementDict, changedProfile, element)
+            if #available(iOS 13.0, tvOS 13.0, *), controller.playerIndex == .index1 {
+                GamepadOverlayStateCenter.shared.publish(
+                    snapshot: GamepadOverlaySnapshot(profile: changedProfile)
+                )
+            }
+        }
+    }
+
     // MARK: - 构建按钮映射
     static func buildMapping(for controller: GCController, swapABXY:Bool)
     -> [ControllerElement : GCControllerElement]
@@ -1247,11 +1278,66 @@ import UIKit
             }
         }
         
+        if controller.extendedGamepad == nil, #available(iOS 14.0, tvOS 14.0, *) {
+            result = buildPhysicalMapping(for: controller.physicalInputProfile, swapABXY: swapABXY)
+        }
+
         if controller === primaryGCController {ControllerUtil.primaryControllerElementMap = result}
         
         return result
     }
     
+    @available(iOS 14.0, tvOS 14.0, *)
+    private static func buildPhysicalMapping(
+        for profile: GCPhysicalInputProfile,
+        swapABXY: Bool
+    ) -> [ControllerElement: GCControllerElement] {
+        ControllerUtil.swapABXY = swapABXY
+        let buttons = profile.buttons
+        var result: [ControllerElement: GCControllerElement] = [:]
+
+        result[.a] = buttons[swapABXY ? GCInputButtonB : GCInputButtonA]
+        result[.b] = buttons[swapABXY ? GCInputButtonA : GCInputButtonB]
+        result[.x] = buttons[swapABXY ? GCInputButtonY : GCInputButtonX]
+        result[.y] = buttons[swapABXY ? GCInputButtonX : GCInputButtonY]
+        result[.leftShoulder] = buttons[GCInputLeftShoulder]
+        result[.rightShoulder] = buttons[GCInputRightShoulder]
+        result[.leftTrigger] = buttons[GCInputLeftTrigger]
+        result[.rightTrigger] = buttons[GCInputRightTrigger]
+        result[.start] = buttons[GCInputButtonMenu]
+        result[.select] = buttons[GCInputButtonOptions]
+        result[.special] = buttons[GCInputButtonHome]
+        result[.leftStickButton] = buttons[GCInputLeftThumbstickButton]
+        result[.rightStickButton] = buttons[GCInputRightThumbstickButton]
+        result[.paddle1] = buttons[GCInputXboxPaddleOne]
+        result[.paddle2] = buttons[GCInputXboxPaddleTwo]
+        result[.paddle3] = buttons[GCInputXboxPaddleThree]
+        result[.paddle4] = buttons[GCInputXboxPaddleFour]
+        result[.touchpadButton] = buttons[GCInputDualShockTouchpadButton]
+        if #available(iOS 15.0, tvOS 15.0, *) {
+            result[.misc] = buttons[GCInputButtonShare]
+        }
+
+        if let dpad = profile.dpads[GCInputDirectionPad] {
+            result[.dpadUp] = dpad.up
+            result[.dpadDown] = dpad.down
+            result[.dpadLeft] = dpad.left
+            result[.dpadRight] = dpad.right
+        }
+        if let leftStick = profile.dpads[GCInputLeftThumbstick] {
+            result[.leftStick] = leftStick
+            result[.leftStickX] = leftStick.xAxis
+            result[.leftStickY] = leftStick.yAxis
+        }
+        if let rightStick = profile.dpads[GCInputRightThumbstick] {
+            result[.rightStick] = rightStick
+            result[.rightStickX] = rightStick.xAxis
+            result[.rightStickY] = rightStick.yAxis
+        }
+
+        return result
+    }
+
     @objc static var activeStreamingGCControllers:NSMutableSet = NSMutableSet()
     
     @objc static var swapABXY:Bool = false
@@ -1276,10 +1362,24 @@ import UIKit
     static var primaryControllerElementMap: [ControllerElement : GCControllerElement]?
     private static var primaryControllerAxisStates: [ControllerElement : ComparisonResult] = [:]
 
+    private static func supportsControllerInput(_ controller: GCController) -> Bool {
+        if controller.extendedGamepad != nil { return true }
+        if #available(iOS 14.0, tvOS 14.0, *) {
+            let profile = controller.physicalInputProfile
+            let hasFaceButton = [GCInputButtonA, GCInputButtonB, GCInputButtonX, GCInputButtonY]
+                .contains { profile.buttons[$0] != nil }
+            let hasDirectionOrStick = profile.dpads[GCInputDirectionPad] != nil
+                || profile.dpads[GCInputLeftThumbstick] != nil
+                || profile.dpads[GCInputRightThumbstick] != nil
+            return hasFaceButton && hasDirectionOrStick
+        }
+        return false
+    }
+
     @objc static func installControllerObserversIfNeeded() {
         guard connectObserver == nil, disconnectObserver == nil else { return }
         
-        if GCController.controllers().first(where: { $0.extendedGamepad != nil }) != nil {
+        if GCController.controllers().first(where: { supportsControllerInput($0) }) != nil {
             preparePrimaryController()
         }
         
@@ -1290,7 +1390,7 @@ import UIKit
         ) { notification in
             guard let controller = notification.object as? GCController else {return}
             
-            if controller.extendedGamepad != nil {
+            if supportsControllerInput(controller) {
                 preparePrimaryController()
             }
             
@@ -1331,7 +1431,7 @@ import UIKit
     }
 
     private static func preparePrimaryController() {
-        guard let controller = GCController.controllers().first(where: { $0.extendedGamepad != nil }) else {
+        guard let controller = GCController.controllers().first(where: { supportsControllerInput($0) }) else {
             stopListeningPrimaryController()
             ControllerUtil.primaryGCController = nil
             if #available(iOS 13.0, *) {
@@ -1426,15 +1526,27 @@ import UIKit
         }
         primaryControllerAxisStates.removeAll()
         primaryGCController?.extendedGamepad?.valueChangedHandler = nil
+        if #available(iOS 14.0, tvOS 14.0, *) {
+            primaryGCController?.physicalInputProfile.valueChangedHandler = nil
+        }
     }
     
     @objc static func listenPrimaryControllerButton(_ button: ControllerElement, ignoreSwapABXY: Bool = true, handler: @escaping (_ pressed: Bool) -> Void){
         if var elementMap = ControllerUtil.primaryControllerElementMap {
-            if ignoreSwapABXY {
-                elementMap[.a] = ControllerUtil.primaryGCController?.extendedGamepad?.buttonA
-                elementMap[.b] = ControllerUtil.primaryGCController?.extendedGamepad?.buttonB
-                elementMap[.x] = ControllerUtil.primaryGCController?.extendedGamepad?.buttonX
-                elementMap[.y] = ControllerUtil.primaryGCController?.extendedGamepad?.buttonY
+            if ignoreSwapABXY, let controller = ControllerUtil.primaryGCController {
+                if let gamepad = controller.extendedGamepad {
+                    elementMap[.a] = gamepad.buttonA
+                    elementMap[.b] = gamepad.buttonB
+                    elementMap[.x] = gamepad.buttonX
+                    elementMap[.y] = gamepad.buttonY
+                }
+                else if #available(iOS 14.0, tvOS 14.0, *) {
+                    let buttons = controller.physicalInputProfile.buttons
+                    elementMap[.a] = buttons[GCInputButtonA]
+                    elementMap[.b] = buttons[GCInputButtonB]
+                    elementMap[.x] = buttons[GCInputButtonX]
+                    elementMap[.y] = buttons[GCInputButtonY]
+                }
             }
             if let gcButton = elementMap[button] as? GCControllerButtonInput {
                 gcButton.pressedChangedHandler = { _, _, pressed in
@@ -1684,7 +1796,7 @@ import UIKit
     // MARK: - tvOS controller tip
     @objc public static func handleGameControllerRequiredTip(in vc: UIViewController?) {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
-            let controllers = GCController.controllers().filter({ $0.extendedGamepad != nil })
+            let controllers = GCController.controllers().filter({ supportsControllerInput($0) })
             if controllers.count == 0 {
                 AlertControllerUtil.showAlert(
                     in: vc,
@@ -1921,6 +2033,47 @@ struct GamepadOverlaySnapshot: Equatable {
     static let idle = GamepadOverlaySnapshot()
 
     init() {}
+
+    @available(iOS 14.0, tvOS 14.0, *)
+    init(profile: GCPhysicalInputProfile) {
+        var pressedButtons = Set<ControllerElement>()
+        let buttons = profile.buttons
+
+        if buttons[GCInputButtonA]?.isPressed == true { pressedButtons.insert(.a) }
+        if buttons[GCInputButtonB]?.isPressed == true { pressedButtons.insert(.b) }
+        if buttons[GCInputButtonX]?.isPressed == true { pressedButtons.insert(.x) }
+        if buttons[GCInputButtonY]?.isPressed == true { pressedButtons.insert(.y) }
+        if buttons[GCInputLeftShoulder]?.isPressed == true { pressedButtons.insert(.leftShoulder) }
+        if buttons[GCInputRightShoulder]?.isPressed == true { pressedButtons.insert(.rightShoulder) }
+        if buttons[GCInputButtonMenu]?.isPressed == true { pressedButtons.insert(.start) }
+        if buttons[GCInputButtonOptions]?.isPressed == true { pressedButtons.insert(.select) }
+        if buttons[GCInputButtonHome]?.isPressed == true { pressedButtons.insert(.special) }
+        if buttons[GCInputLeftThumbstickButton]?.isPressed == true { pressedButtons.insert(.leftStickButton) }
+        if buttons[GCInputRightThumbstickButton]?.isPressed == true { pressedButtons.insert(.rightStickButton) }
+
+        var dpadHighlight = 0
+        if let dpad = profile.dpads[GCInputDirectionPad] {
+            if dpad.up.isPressed { dpadHighlight |= DPadHighlight.up.rawValue }
+            if dpad.down.isPressed { dpadHighlight |= DPadHighlight.down.rawValue }
+            if dpad.left.isPressed { dpadHighlight |= DPadHighlight.left.rawValue }
+            if dpad.right.isPressed { dpadHighlight |= DPadHighlight.right.rawValue }
+        }
+
+        let leftStick = profile.dpads[GCInputLeftThumbstick]
+        let rightStick = profile.dpads[GCInputRightThumbstick]
+        self.pressedButtons = pressedButtons
+        self.dpadHighlight = dpadHighlight
+        self.leftStick = CGPoint(
+            x: CGFloat(max(-1, min(1, leftStick?.xAxis.value ?? 0))),
+            y: CGFloat(max(-1, min(1, leftStick?.yAxis.value ?? 0)))
+        )
+        self.rightStick = CGPoint(
+            x: CGFloat(max(-1, min(1, rightStick?.xAxis.value ?? 0))),
+            y: CGFloat(max(-1, min(1, rightStick?.yAxis.value ?? 0)))
+        )
+        self.leftTrigger = CGFloat(max(0, min(1, buttons[GCInputLeftTrigger]?.value ?? 0)))
+        self.rightTrigger = CGFloat(max(0, min(1, buttons[GCInputRightTrigger]?.value ?? 0)))
+    }
 
     init(gamepad: GCExtendedGamepad) {
         var pressedButtons = Set<ControllerElement>()
