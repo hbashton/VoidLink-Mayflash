@@ -1003,6 +1003,20 @@ static __weak ControllerSupport *VLSharedControllerSupport = nil;
 
 -(void) initializeControllerBattery:(VoidController*) controller
 {
+    // Generic-profile input is processed on a private serial queue. NSTimer must
+    // be scheduled on a thread with a running run loop, so move timer setup back
+    // to main and discard it if the controller disconnected in the meantime.
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (self->_isCleaningUp ||
+                [self->_voidControllers objectForKey:@(controller.playerIndex)] != controller) {
+                return;
+            }
+            [self initializeControllerBattery:controller];
+        });
+        return;
+    }
+
     if (@available(iOS 14.0, tvOS 14.0, *)) {
         if (controller.gamepad.battery) {
             // Poll for updated battery status every 30 seconds
@@ -1456,11 +1470,15 @@ double rc_expo(double x, double expo) {
             : (toggleButtonConfigured ? self->_gyroToggleEnabled : self->_reverseHoldButton);
 
         if (self->_gyroEnabledFlag != wasGyroEnabled) {
+            BOOL requestedGyroEnabled = self->_gyroEnabledFlag;
             // Generic-profile input is processed on a worker queue, while the
             // motion callback and its stick-mixing state run on the main queue.
             dispatch_async(dispatch_get_main_queue(), ^{
                 @synchronized (self) {
-                    if (self->_isCleaningUp) return;
+                    // A fast press/release can queue both transitions before
+                    // main processes either one. Ignore stale transitions so a
+                    // short press still leaves motion control in the final state.
+                    if (self->_isCleaningUp || self->_gyroEnabledFlag != requestedGyroEnabled) return;
                     [self switchMotionControlOnOffByControllerButton];
                 }
             });
