@@ -53,10 +53,7 @@ static NSArray<NSDictionary<NSString *, id> *> *diagnosticMappedControls(
     GCPhysicalInputProfile *profile
 ) {
     NSMutableArray<NSDictionary<NSString *, id> *> *mappedControls = [NSMutableArray array];
-    NSDictionary<NSString *, GCControllerElement *> *physicalElements = @{};
-    if (@available(iOS 14.0, tvOS 14.0, *)) {
-        physicalElements = profile.allElements;
-    }
+    NSDictionary<NSString *, GCControllerElement *> *physicalElements = profile.elements ?: @{};
     [elementMap enumerateKeysAndObjectsUsingBlock:^(NSNumber *elementFlag, GCControllerElement *element, BOOL *stop) {
         NSMutableArray<NSString *> *physicalNames = [NSMutableArray array];
         [physicalElements enumerateKeysAndObjectsUsingBlock:^(NSString *name, GCControllerElement *physicalElement, BOOL *innerStop) {
@@ -81,6 +78,18 @@ static NSDictionary<NSString *, id> *diagnosticCommonControllerFields(VoidContro
         @"vendor": gamepad.vendorName ?: @"unknown",
         @"product_category": gamepad.productCategory ?: @"unknown"
     };
+}
+
+static void recordControllerDiscovery(GCController *controller, NSString *source) {
+    GCPhysicalInputProfile *profile = controller.physicalInputProfile;
+    NSDictionary<NSString *, id> *fields = @{
+        @"source": source ?: @"unknown",
+        @"vendor": controller.vendorName ?: @"unknown",
+        @"product_category": controller.productCategory ?: @"unknown",
+        @"profile": controller.extendedGamepad != nil ? @"extended" : @"generic",
+        @"physical_elements": profile.elements.allKeys ?: @[]
+    };
+    [ControllerDiagnostics recordEvent:@"controller_discovered" fields:fields];
 }
 
 static void recordControllerInputCallback(
@@ -2519,9 +2528,7 @@ double rc_expo(double x, double expo) {
                 : [NSMutableDictionary dictionary];
             fields[@"listener"] = controller.extendedGamepad != nil ? @"extended_gamepad" : @"generic_physical_profile";
             fields[@"legacy_pause_handler"] = @(useLegacyPausedHandler);
-            if (@available(iOS 14.0, tvOS 14.0, *)) {
-                fields[@"physical_elements"] = controller.physicalInputProfile.allElements.allKeys ?: @[];
-            }
+            fields[@"physical_elements"] = controller.physicalInputProfile.elements.allKeys ?: @[];
             [ControllerDiagnostics recordEvent:@"controller_callbacks_registered" fields:fields];
         }
     } else {
@@ -2790,9 +2797,7 @@ double rc_expo(double x, double expo) {
     Log(LOG_I, @"Tracking controller endpoint locally as %d; waiting for its first button press", localIndex);
     NSMutableDictionary<NSString *, id> *fields = [NSMutableDictionary dictionaryWithDictionary:diagnosticCommonControllerFields(voidController)];
     fields[@"waits_for_input_before_arrival"] = @(voidController.waitsForInputBeforeArrival);
-    if (@available(iOS 14.0, tvOS 14.0, *)) {
-        fields[@"physical_elements"] = controller.physicalInputProfile.allElements.allKeys ?: @[];
-    }
+    fields[@"physical_elements"] = controller.physicalInputProfile.elements.allKeys ?: @[];
     [ControllerDiagnostics recordEvent:@"controller_endpoint_assigned_locally" fields:fields];
     return voidController;
 }
