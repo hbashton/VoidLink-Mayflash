@@ -1161,7 +1161,7 @@ import UIKit
         }
     }
     
-    @available(iOS 14.0, tvOS 14.0, *)
+    @available(iOS 16.0, tvOS 16.0, *)
     @objc static func listenPhysicalProfile(
         controller: GCController,
         swapABXY: Bool,
@@ -1364,7 +1364,7 @@ import UIKit
 
     private static func supportsControllerInput(_ controller: GCController) -> Bool {
         if controller.extendedGamepad != nil { return true }
-        if #available(iOS 14.0, tvOS 14.0, *) {
+        if #available(iOS 16.0, tvOS 16.0, *) {
             let profile = controller.physicalInputProfile
             let hasFaceButton = [GCInputButtonA, GCInputButtonB, GCInputButtonX, GCInputButtonY]
                 .contains { profile.buttons[$0] != nil }
@@ -1526,7 +1526,7 @@ import UIKit
         }
         primaryControllerAxisStates.removeAll()
         primaryGCController?.extendedGamepad?.valueChangedHandler = nil
-        if #available(iOS 14.0, tvOS 14.0, *) {
+        if #available(iOS 16.0, tvOS 16.0, *) {
             primaryGCController?.physicalInputProfile.valueDidChangeHandler = nil
         }
     }
