@@ -1476,9 +1476,10 @@ import UIKit
             guard GCController.controllers().count == 1
                     || GCController.controllers().count == 2 else { return }
         }
-        else {
-            guard GCController.controllers().count == 1 else { return }
-        }
+
+        // On iOS, adapters such as Mayflash can expose several physical ports
+        // as separate GCController objects. Keep one stable primary controller
+        // for VoidLink navigation while the other controllers stream normally.
         
         if let mainFrameVC = delegate as? MainFrameViewController {
             let vc = mainFrameVC.isStreaming() ? StreamFrameViewController.sharedInstance() : mainFrameVC
