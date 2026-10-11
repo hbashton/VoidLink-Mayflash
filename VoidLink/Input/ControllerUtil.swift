@@ -1184,7 +1184,7 @@ import UIKit
         profile.valueDidChangeHandler = { [weak controller] changedProfile, element in
             guard let controller else { return }
             handler(elementDict, changedProfile, element)
-            if #available(iOS 13.0, tvOS 13.0, *), controller.playerIndex == .index1 {
+            if controller.playerIndex == .index1 {
                 GamepadOverlayStateCenter.shared.publish(
                     snapshot: GamepadOverlaySnapshot(profile: changedProfile)
                 )
