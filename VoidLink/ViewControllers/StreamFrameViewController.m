@@ -1700,7 +1700,7 @@ static __weak StreamFrameViewController *VLSharedStreamFrameViewController = nil
 - (void) connectionStarted {
     Log(LOG_I, @"Connection started");
     [ControllerDiagnostics recordEvent:@"stream_connection_started" fields:@{
-        @"connected_controller_count": @([ControllerSupport getGamepadCount]),
+        @"connected_controller_count": @([GCController controllers].count),
         @"timestamp_source": @"StreamFrameViewController connectionStarted callback"
     }];
     dispatch_async(dispatch_get_main_queue(), ^{
