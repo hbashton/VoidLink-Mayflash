@@ -2270,6 +2270,9 @@ double rc_expo(double x, double expo) {
             short rightStickX = (short)rightOffset.dx;
             short rightStickY = (short)rightOffset.dy;
 
+            // Keep physical axes on their own controller. updateFinished merges
+            // that state with OSC for P1; redirecting samples to OSC here can
+            // leave a pre-assignment physical value stuck in the merged state.
             if (voidController.streamPlayerIndex == 0
                 && [self useMotionHandler]
                 && self->motionHandler.motionControlStarted
@@ -2279,7 +2282,7 @@ double rc_expo(double x, double expo) {
                 [self->motionHandler mixPhysicalRightStickAndGyroInputWithX:rightStickX y:rightStickY];
             }
             else {
-                [self updateRightStick:(voidController.streamPlayerIndex == 0 ? self->_oscController : voidController)
+                [self updateRightStick:voidController
                                      x:rightStickX
                                      y:rightStickY];
             }
@@ -2293,7 +2296,7 @@ double rc_expo(double x, double expo) {
                 [self->motionHandler mixPhysicalLeftStickAndGyroInputWithX:leftStickX y:leftStickY];
             }
             else {
-                [self updateLeftStick:(voidController.streamPlayerIndex == 0 ? self->_oscController : voidController)
+                [self updateLeftStick:voidController
                                     x:leftStickX
                                     y:leftStickY];
             }
@@ -2493,6 +2496,9 @@ double rc_expo(double x, double expo) {
             short rightStickX = (short)rightOffset.dx;
             short rightStickY = (short)rightOffset.dy;
 
+            // Keep physical axes on their own controller. updateFinished merges
+            // that state with OSC for P1; redirecting samples to OSC here can
+            // leave a pre-assignment physical value stuck in the merged state.
             if (voidController.streamPlayerIndex == 0
                 && [self useMotionHandler]
                 && self->motionHandler.motionControlStarted
@@ -2502,7 +2508,7 @@ double rc_expo(double x, double expo) {
                 [self->motionHandler mixPhysicalRightStickAndGyroInputWithX:rightStickX y:rightStickY];
             }
             else {
-                [self updateRightStick:(voidController.streamPlayerIndex == 0 ? self->_oscController : voidController)
+                [self updateRightStick:voidController
                                      x:rightStickX
                                      y:rightStickY];
             }
@@ -2516,7 +2522,7 @@ double rc_expo(double x, double expo) {
                 [self->motionHandler mixPhysicalLeftStickAndGyroInputWithX:leftStickX y:leftStickY];
             }
             else {
-                [self updateLeftStick:(voidController.streamPlayerIndex == 0 ? self->_oscController : voidController)
+                [self updateLeftStick:voidController
                                     x:leftStickX
                                     y:leftStickY];
             }
