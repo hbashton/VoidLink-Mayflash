@@ -78,6 +78,8 @@ typedef NS_ENUM(NSInteger, ControllerDeviceBatteryState) {
 @property (nonatomic)                   BOOL rightTriggerDigitallyPressed;
 @property (nonatomic)                   NSUInteger inputOrderGeneration;
 @property (nonatomic)                   BOOL acceptsInput;
+@property (nonatomic)                   BOOL didLogControllerArrivalFailure;
+@property (nonatomic)                   BOOL didLogControllerInputFailure;
 @property (nonatomic)                   VoidController* _Nullable mergedWithController;
 
 @property(nonatomic, strong) NSMutableSet* _Nullable motionTypes;

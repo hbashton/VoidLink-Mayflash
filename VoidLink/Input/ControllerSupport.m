@@ -1099,9 +1099,19 @@ static BOOL triggerValueIsDigitallyPressed(CGFloat value, BOOL wasPressed) {
             //NSLog(@"gamepadMask: %@", [self binaryRepresentationOfInteger:buttonFlags]); // we got the pressed OSC buttons here.
             
             // Player 0 is always present for OSC
-            LiSendMultiControllerEvent(_multiController ? controller.streamPlayerIndex : 0, [self getActiveGamepadMask],
-                                       buttonFlags, leftTrigger, rightTrigger,
-                                       leftStickX, leftStickY, rightStickX, rightStickY);
+            int inputResult = LiSendMultiControllerEvent(_multiController ? controller.streamPlayerIndex : 0,
+                                                         [self getActiveGamepadMask],
+                                                         buttonFlags, leftTrigger, rightTrigger,
+                                                         leftStickX, leftStickY, rightStickX, rightStickY);
+            if (inputResult != 0 && !controller.didLogControllerInputFailure) {
+                Log(LOG_E, @"Could not send controller state for Sunshine P%d (error %d)",
+                    controller.streamPlayerIndex + 1,
+                    inputResult);
+                controller.didLogControllerInputFailure = YES;
+            }
+            else if (inputResult == 0) {
+                controller.didLogControllerInputFailure = NO;
+            }
         }
     }
     [_controllerStreamLock unlock];
@@ -1543,11 +1553,19 @@ static BOOL triggerValueIsDigitallyPressed(CGFloat value, BOOL wasPressed) {
     // Report the new controller to the host
     // NB: This will fail if the connection hasn't been fully established yet
     // and we will try again later.
-    if (LiSendControllerArrivalEvent(voidController.streamPlayerIndex,
-                                     [self getActiveGamepadMask],
-                                     type,
-                                     supportedButtonFlags,
-                                     capabilities) != 0) {
+    int arrivalResult = LiSendControllerArrivalEvent(voidController.streamPlayerIndex,
+                                                      [self getActiveGamepadMask],
+                                                      type,
+                                                      supportedButtonFlags,
+                                                      capabilities);
+    if (arrivalResult != 0) {
+        if (!voidController.didLogControllerArrivalFailure) {
+            Log(LOG_E, @"Could not announce %@ as Sunshine P%d (error %d); will retry on the next input",
+                voidController.gamepad.vendorName ?: @"controller",
+                voidController.streamPlayerIndex + 1,
+                arrivalResult);
+            voidController.didLogControllerArrivalFailure = YES;
+        }
         if (voidController.waitsForInputBeforeArrival) {
             _controllerNumbers &= ~(1 << voidController.streamPlayerIndex);
         }
@@ -1557,6 +1575,7 @@ static BOOL triggerValueIsDigitallyPressed(CGFloat value, BOOL wasPressed) {
     // Begin polling for battery status
     // Remember that we've reported arrival already
     voidController.reportedArrival = YES;
+    voidController.didLogControllerArrivalFailure = NO;
     if (voidController.waitsForInputBeforeArrival) {
         _reservedControllerNumbers &= ~(1 << voidController.streamPlayerIndex);
     }
@@ -1859,10 +1878,17 @@ double rc_expo(double x, double expo) {
             }
         }
 
-        int radialMenuButton = ControllerElementNull;
+        BOOL hasMeaningfulInput = hasPressedButton ||
+            fabs(leftX) >= 0.15 || fabs(leftY) >= 0.15 ||
+            fabs(rightX) >= 0.15 || fabs(rightY) >= 0.15 ||
+            primaryTouchActive || secondaryTouchActive;
+
+        // Streaming radial-menu input is always logical Start. Do not read the
+        // app-primary setting here: it can still be RT while P1 is switching
+        // from the pre-stream controller to a generic adapter endpoint.
+        int radialMenuButton = ControllerElementStart;
         BOOL controllerNavigatorEnabled = NO;
         if (@available(iOS 13.0, tvOS 13.0, *)) {
-            radialMenuButton = ControllerNavigator.radialMenuButton;
             controllerNavigatorEnabled = ControllerNavigator.enabled;
         }
         dispatch_async(self->_controllerInputQueue, ^{
@@ -1871,9 +1897,9 @@ double rc_expo(double x, double expo) {
                 if (!voidController.acceptsInput || voidController.gamepad != controller ||
                     voidController.inputOrderGeneration != orderGeneration) return;
                 if (voidController.requiresButtonReleaseAfterOrderReset) {
-                    if (!hasPressedButton) voidController.requiresButtonReleaseAfterOrderReset = NO;
+                    if (!hasMeaningfulInput) voidController.requiresButtonReleaseAfterOrderReset = NO;
                 }
-                else if (!voidController.hasReceivedInput && hasPressedButton) {
+                else if (!voidController.hasReceivedInput && hasMeaningfulInput) {
                     voidController.hasReceivedInput = YES;
                     newlyClaimedSlot = YES;
                 }
@@ -1882,6 +1908,8 @@ double rc_expo(double x, double expo) {
             // Assign the host port before processing this snapshot. That lets
             // the very first Start press be handled as P1's radial-menu action.
             if (newlyClaimedSlot) {
+                Log(LOG_I, @"Controller %@ received its first input; requesting a Sunshine port",
+                    controller.vendorName ?: @"controller");
                 [self->_controllerStreamLock lock];
                 [self reportControllerArrivalLocked:voidController];
                 [self->_controllerStreamLock unlock];
@@ -2057,12 +2085,19 @@ double rc_expo(double x, double expo) {
             secondaryTouchActive = secondaryTouchX != 0 || secondaryTouchY != 0;
         }
 
+        BOOL hasMeaningfulInput = hasPressedButton ||
+            fabs(leftX) >= 0.15 || fabs(leftY) >= 0.15 ||
+            fabs(rightX) >= 0.15 || fabs(rightY) >= 0.15 ||
+            primaryTouchActive || secondaryTouchActive;
+
         NSDictionary<NSNumber *, NSNumber *> *buttonStates = [capturedButtonStates copy];
 
-        int radialMenuButton = ControllerElementNull;
+        // Use the same stable logical Start control for generic profiles. The
+        // global menu-button value can lag behind the stream transition and
+        // otherwise turn GameCube RT into the menu button.
+        int radialMenuButton = ControllerElementStart;
         BOOL controllerNavigatorEnabled = NO;
         if (@available(iOS 13.0, tvOS 13.0, *)) {
-            radialMenuButton = ControllerNavigator.radialMenuButton;
             controllerNavigatorEnabled = ControllerNavigator.enabled;
         }
         dispatch_async(self->_controllerInputQueue, ^{
@@ -2071,9 +2106,9 @@ double rc_expo(double x, double expo) {
                 if (!voidController.acceptsInput || voidController.gamepad != controller ||
                     voidController.inputOrderGeneration != orderGeneration) return;
                 if (voidController.requiresButtonReleaseAfterOrderReset) {
-                    if (!hasPressedButton) voidController.requiresButtonReleaseAfterOrderReset = NO;
+                    if (!hasMeaningfulInput) voidController.requiresButtonReleaseAfterOrderReset = NO;
                 }
-                else if (!voidController.hasReceivedInput && hasPressedButton) {
+                else if (!voidController.hasReceivedInput && hasMeaningfulInput) {
                     voidController.hasReceivedInput = YES;
                     newlyClaimedSlot = YES;
                 }
@@ -2082,6 +2117,8 @@ double rc_expo(double x, double expo) {
             // Claim the Sunshine port before applying the snapshot that caused
             // it, so the first input and P1 navigation stay in the same order.
             if (newlyClaimedSlot) {
+                Log(LOG_I, @"Generic controller %@ received its first input; requesting a Sunshine port",
+                    controller.vendorName ?: @"controller");
                 [self->_controllerStreamLock lock];
                 [self reportControllerArrivalLocked:voidController];
                 [self->_controllerStreamLock unlock];

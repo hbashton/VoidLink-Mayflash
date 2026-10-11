@@ -549,12 +549,10 @@ final class ControllerNavigator: NSObject {
         radialMenuDelegate?.controllerNavigatorDidSelect(item:item)
         switch item {
         case .gameProfiles, .addHost, .aboutView:
-            radialMenuView?.dismiss()
-            radialMenuView = nil
+            dismissRadialMenu()
         case .disconnect:
             if radialMenuState == .disconnectAndQuit {
-                radialMenuView?.dismiss()
-                radialMenuView = nil
+                dismissRadialMenu()
                 StreamFrameViewController.sharedInstance().returnToMainFrame()
                 break
             }
@@ -564,8 +562,7 @@ final class ControllerNavigator: NSObject {
                 break
             }
         case .quitApp:
-            radialMenuView?.dismiss()
-            radialMenuView = nil
+            dismissRadialMenu()
             StreamFrameViewController.sharedInstance().disconnectAndQuitApp()
         case .more:
             radialMenuState = .moreOptions
@@ -573,20 +570,19 @@ final class ControllerNavigator: NSObject {
         case .mouse:
             if radialMenuState != .mouseModeEnabled {
                 radialMenuState = .mouseModeEnabled
-                updateRadialMenu()
             }
             else {
                 stopControllerMouseTimer()
                 radialMenuState = .main
-                updateRadialMenu()
             }
+            // Mouse mode remains active, but the selection overlay should close.
+            dismissRadialMenu(resetState: false)
         case .textInput:
             StreamFrameViewController.sharedInstance().remoteTextInputForTvOS()
+            dismissRadialMenu()
         case .resetControllerOrder:
             ControllerSupport.sharedInstance()?.resetControllerOrder()
-            radialMenuView?.dismiss()
-            radialMenuView = nil
-            radialMenuState = .main
+            dismissRadialMenu()
         case .theme:
             let targetTheme: UIUserInterfaceStyle = ThemeManager.userInterfaceStyle() == .light ? .dark : .light
             DispatchQueue.main.async {
@@ -602,10 +598,10 @@ final class ControllerNavigator: NSObject {
             let settings = dataMan.retrieveSettings()
             settings?.appTheme = NSNumber(value: targetTheme.rawValue)
             dataMan.saveData()
+            dismissRadialMenu()
         case .navigationSettings:
             DispatchQueue.main.async {
-                radialMenuView?.dismiss()
-                radialMenuView = nil
+                dismissRadialMenu()
                 if let mainFrameVC = radialMenuDelegate as? MainFrameViewController {
                     mainFrameVC.expandSettingsView()
                     DispatchQueue.main.asyncAfter(deadline: .now()+0.3) {
@@ -622,13 +618,24 @@ final class ControllerNavigator: NSObject {
             exit(0)
         case .toolbox:
             DispatchQueue.main.async {
-                radialMenuView?.dismiss()
-                radialMenuView = nil
+                dismissRadialMenu()
                 StreamFrameViewController.sharedInstance().bringUpToolboxMenuWithoutWidgetLayoutTool()
             }
         default:
-            break
+            // Settings, host view, favorites and similar actions finish in the
+            // selected screen. Leaving the overlay mounted made it look like
+            // the button release was required to complete the selection.
+            dismissRadialMenu()
         }
+    }
+
+    private static func dismissRadialMenu(resetState: Bool = true) {
+        radialMenuView?.dismiss()
+        radialMenuView = nil
+        if resetState {
+            radialMenuState = .main
+        }
+        updateUINavigationDelegateState()
     }
     
     @objc static func updateRadialMenu() {
@@ -758,11 +765,17 @@ final class ControllerNavigator: NSObject {
     }
 
     private static func handleRadialMenuButtonChange(_ pressed: Bool, mainFrameVC: MainFrameViewController) {
+        // The streaming control is logical Start even if a pre-stream local
+        // controller left the shared display state on RT.
+        if mainFrameVC.isStreaming() {
+            radialMenuButton = .start
+        }
         GamepadNavigationIllustrationHud.updateActionState(for: radialMenuButton, isInAction: pressed)
         if pressed {
             radialMenuPressDownTimestamp = CACurrentMediaTime()
             radialMenuDelayTimer?.clean()
             radialMenuButtonPressed = true
+            stickReleasedInRadialMenu = false
             let delayRadialMenu = (mainFrameVC.isStreaming() && !mainFrameVC.settingsExpandedInStreamView) || streamingRadialMenuDelay < 0.03
             streamingRadialMenuDelay = max(streamingRadialMenuDelay, 0.032)
 
@@ -788,10 +801,17 @@ final class ControllerNavigator: NSObject {
                 // A short tap should not leave the delayed hold action armed.
                 radialMenuButtonPressed = false
                 radialMenuDelayTimer?.clean()
+                stickReleasedInRadialMenu = false
                 return
             }
             radialMenuButtonPressed = false
             radialMenuDelayTimer?.clean()
+            if stickReleasedInRadialMenu {
+                // The selected action already dismissed the overlay. Do not
+                // turn the matching Start release into a host button press.
+                stickReleasedInRadialMenu = false
+                return
+            }
             stickReleasedInRadialMenu = false
             if radialMenuView == nil, let vc = uiNavigationDelegate as? StreamFrameViewController, vc.hasNoPresentedVC {
                 ControllerSupport.sharedInstance()?.sendNavigationButtonPress()
