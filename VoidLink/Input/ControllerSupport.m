@@ -942,7 +942,7 @@ static __weak ControllerSupport *VLSharedControllerSupport = nil;
             for (GCControllerElement* element in controller.physicalInputProfile.allElements) {
                 element.preferredSystemGestureState = GCSystemGestureStateEnabled;
             }
-            controller.physicalInputProfile.valueChangedHandler = NULL;
+            controller.physicalInputProfile.valueDidChangeHandler = NULL;
         }
 
         if (controller.extendedGamepad != NULL) {
