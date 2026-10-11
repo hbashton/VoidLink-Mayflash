@@ -36,6 +36,10 @@ static __weak ControllerSupport *VLSharedControllerSupport = nil;
 - (void) releaseControllerTouchpadContacts:(VoidController*)controller;
 - (void) handleControllerTouchpad:(VoidController*)controller x:(float)x y:(float)y active:(BOOL)isActive index:(int)index;
 - (BOOL) reportControllerArrivalLocked:(VoidController*)voidController;
+- (nullable VoidController*) voidControllerForGamepadLocked:(GCController*)gamepad;
+- (nullable VoidController*) voidControllerForStreamPlayerIndexLocked:(NSInteger)playerIndex;
+- (BOOL) assignStreamPlayerIndexLocked:(VoidController*)voidController;
+- (void) resetControllerOrder;
 
 @end
 
@@ -137,7 +141,9 @@ static __weak ControllerSupport *VLSharedControllerSupport = nil;
 
 -(void) rumble:(unsigned short)controllerNumber lowFreqMotor:(unsigned short)lowFreqMotor highFreqMotor:(unsigned short)highFreqMotor
 {
-    VoidController* voidController = [_voidControllers objectForKey:[NSNumber numberWithInteger:controllerNumber]];
+    [_controllerStreamLock lock];
+    VoidController* voidController = [self voidControllerForStreamPlayerIndexLocked:controllerNumber];
+    [_controllerStreamLock unlock];
     
     HapticEnginePreference preference = tempSettings.hapticEngine.intValue;
         
@@ -187,7 +193,9 @@ static __weak ControllerSupport *VLSharedControllerSupport = nil;
 
 -(void) rumbleTriggers:(uint16_t)controllerNumber leftTrigger:(uint16_t)leftTrigger rightTrigger:(uint16_t)rightTrigger
 {
-    VoidController* controller = [_voidControllers objectForKey:[NSNumber numberWithInteger:controllerNumber]];
+    [_controllerStreamLock lock];
+    VoidController* controller = [self voidControllerForStreamPlayerIndexLocked:controllerNumber];
+    [_controllerStreamLock unlock];
     if (controller == nil && controllerNumber == 0 && _oscEnabled) {
         // TODO: Trigger rumble emulation for OSC
     }
@@ -540,7 +548,9 @@ static __weak ControllerSupport *VLSharedControllerSupport = nil;
     //if (@available(iOS 14.0, tvOS 14.0, *)) {
         NSLog(@"gyroMode: %ld", (long)_gyroMode);
         
-        VoidController* voidController = [_voidControllers objectForKey:[NSNumber numberWithInteger:controllerNumber]];
+        [_controllerStreamLock lock];
+        VoidController* voidController = [self voidControllerForStreamPlayerIndexLocked:controllerNumber];
+        [_controllerStreamLock unlock];
         //using device motion
         if (voidController == nil || _gyroMode == AlwaysDevice) {
             // No connected controller for this player, use the _oscController instead
@@ -573,7 +583,9 @@ static __weak ControllerSupport *VLSharedControllerSupport = nil;
 
 -(void) setControllerLed:(uint16_t)controllerNumber r:(uint8_t)r g:(uint8_t)g b:(uint8_t)b {
     if (@available(iOS 14.0, tvOS 14.0, *)) {
-        VoidController* controller = [_voidControllers objectForKey:[NSNumber numberWithInteger:controllerNumber]];
+        [_controllerStreamLock lock];
+        VoidController* controller = [self voidControllerForStreamPlayerIndexLocked:controllerNumber];
+        [_controllerStreamLock unlock];
         if (controller == nil) {
             // No connected controller for this player
             return;
@@ -606,7 +618,9 @@ static __weak ControllerSupport *VLSharedControllerSupport = nil;
 
     dispatch_async(dispatch_get_main_queue(), ^{
         if (@available(iOS 14.5, tvOS 14.5, *)) {
-            VoidController* controller = [self->_voidControllers objectForKey:@(controllerNumber)];
+            [self->_controllerStreamLock lock];
+            VoidController* controller = [self voidControllerForStreamPlayerIndexLocked:controllerNumber];
+            [self->_controllerStreamLock unlock];
             if (controller == nil) {
                 Log(LOG_W, @"Ignoring adaptive trigger effect for missing gamepad %u", controllerNumber);
                 return;
@@ -651,7 +665,9 @@ static __weak ControllerSupport *VLSharedControllerSupport = nil;
             }
         }
         if (@available(iOS 14.5, tvOS 14.5, *)) {
-            VoidController* controller = [self->_voidControllers objectForKey:@(controllerNumber)];
+            [self->_controllerStreamLock lock];
+            VoidController* controller = [self voidControllerForStreamPlayerIndexLocked:controllerNumber];
+            [self->_controllerStreamLock unlock];
             if (controller == nil ||
                 ![controller.gamepad.extendedGamepad isKindOfClass:[GCDualSenseGamepad class]]) {
                 return;
@@ -679,7 +695,9 @@ static __weak ControllerSupport *VLSharedControllerSupport = nil;
     __block BOOL result = NO;
     dispatch_block_t checkBlock = ^{
         if (@available(iOS 14.5, tvOS 14.5, *)) {
-            VoidController* controller = [self->_voidControllers objectForKey:@(controllerNumber)];
+            [self->_controllerStreamLock lock];
+            VoidController* controller = [self voidControllerForStreamPlayerIndexLocked:controllerNumber];
+            [self->_controllerStreamLock unlock];
             result = controller != nil &&
                 [controller.gamepad.extendedGamepad isKindOfClass:[GCDualSenseGamepad class]];
         }
@@ -869,6 +887,131 @@ static __weak ControllerSupport *VLSharedControllerSupport = nil;
     return (_multiController ? _controllerNumbers : 1) | (_oscEnabled ? 1 : 0);
 }
 
+// _voidControllers is keyed by a local bookkeeping index. The Sunshine port is
+// deliberately separate because it is assigned only after a button press.
+- (VoidController*)voidControllerForGamepadLocked:(GCController*)gamepad
+{
+    for (VoidController* controller in _voidControllers.allValues) {
+        if (controller.gamepad == gamepad) return controller;
+    }
+    return nil;
+}
+
+- (VoidController*)voidControllerForStreamPlayerIndexLocked:(NSInteger)playerIndex
+{
+    for (VoidController* controller in _voidControllers.allValues) {
+        if (controller.streamPlayerIndex == playerIndex && controller.reportedArrival) return controller;
+    }
+    return nil;
+}
+
+- (BOOL)assignStreamPlayerIndexLocked:(VoidController*)voidController
+{
+    if (!_multiController) {
+        voidController.streamPlayerIndex = 0;
+        _reservedControllerNumbers |= 1;
+        return YES;
+    }
+
+    if (voidController.streamPlayerIndex >= 0) return YES;
+
+    for (int playerIndex = 0; playerIndex < 4; playerIndex++) {
+        int slotBit = 1 << playerIndex;
+        if (((_controllerNumbers | _reservedControllerNumbers) & slotBit) == 0) {
+            voidController.streamPlayerIndex = playerIndex;
+            _reservedControllerNumbers |= slotBit;
+            return YES;
+        }
+    }
+
+    Log(LOG_W, @"No free Sunshine controller port for %@", voidController.gamepad.vendorName ?: @"controller");
+    return NO;
+}
+
+- (void)resetControllerOrder
+{
+    if (![NSThread isMainThread]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self resetControllerOrder];
+        });
+        return;
+    }
+
+    // Drain earlier snapshots, then invalidate any callback that was captured
+    // before this reset but reaches the serial worker afterward.
+    dispatch_sync(_controllerInputQueue, ^{});
+    for (VoidController* controller in _voidControllers.allValues) {
+        [self stopTimerForController:controller];
+        [self cleanupControllerBattery:controller];
+    }
+    [self stopTimerForController:_oscController];
+    [_controllerStreamLock lock];
+    if (_isCleaningUp) {
+        [_controllerStreamLock unlock];
+        return;
+    }
+
+    uint16_t previouslyActiveMask = [self getActiveGamepadMask];
+    _controllerNumbers = 0;
+    _reservedControllerNumbers = 0;
+    for (VoidController* controller in _voidControllers.allValues) {
+        BOOL hasButtonHeld = NO;
+        if (@available(iOS 14.0, tvOS 14.0, *)) {
+            for (GCControllerButtonInput* button in controller.gamepad.physicalInputProfile.buttons.allValues) {
+                if (button.pressed) {
+                    hasButtonHeld = YES;
+                    break;
+                }
+            }
+        }
+
+        @synchronized (controller) {
+            controller.inputOrderGeneration++;
+            controller.streamPlayerIndex = -1;
+            controller.reportedArrival = NO;
+            controller.hasReceivedInput = NO;
+            controller.requiresButtonReleaseAfterOrderReset = hasButtonHeld;
+            controller.lastButtonFlags = 0;
+            controller.emulatingButtonFlags = 0;
+            controller.lastLeftTrigger = 0;
+            controller.lastRightTrigger = 0;
+            controller.lastLeftStickX = 0;
+            controller.lastLeftStickY = 0;
+            controller.lastRightStickX = 0;
+            controller.lastRightStickY = 0;
+            controller.primaryTouch = (controller_touch_context_t){0};
+            controller.secondaryTouch = (controller_touch_context_t){0};
+            controller.mergedWithController = nil;
+        }
+    }
+
+    @synchronized (_oscController) {
+        _oscController.reportedArrival = NO;
+        _oscController.lastButtonFlags = 0;
+        _oscController.emulatingButtonFlags = 0;
+        _oscController.lastLeftTrigger = 0;
+        _oscController.lastRightTrigger = 0;
+        _oscController.lastLeftStickX = 0;
+        _oscController.lastLeftStickY = 0;
+        _oscController.lastRightStickX = 0;
+        _oscController.lastRightStickY = 0;
+        _oscController.mergedWithController = nil;
+    }
+
+    // Drop every old host association. The next button press announces a fresh
+    // controller on the first free Sunshine port.
+    int result = 0;
+    for (int playerIndex = 0; playerIndex < 16; playerIndex++) {
+        if (previouslyActiveMask & (1 << playerIndex)) {
+            int sendResult = LiSendMultiControllerEvent(playerIndex, 0, 0, 0, 0, 0, 0, 0, 0);
+            if (sendResult != 0) result = sendResult;
+        }
+    }
+    [_controllerStreamLock unlock];
+    Log(LOG_I, @"Controller order reset; cleared host controller ports (send result %d)", result);
+    [_delegate gamepadPresenceChanged];
+}
+
 -(void) updateFinished:(VoidController*)controller
 {
     BOOL exitRequested = NO;
@@ -905,7 +1048,7 @@ static __weak ControllerSupport *VLSharedControllerSupport = nil;
             //NSLog(@"gamepadMask: %@", [self binaryRepresentationOfInteger:buttonFlags]); // we got the pressed OSC buttons here.
             
             // Player 0 is always present for OSC
-            LiSendMultiControllerEvent(_multiController ? controller.playerIndex : 0, [self getActiveGamepadMask],
+            LiSendMultiControllerEvent(_multiController ? controller.streamPlayerIndex : 0, [self getActiveGamepadMask],
                                        buttonFlags, leftTrigger, rightTrigger,
                                        leftStickX, leftStickY, rightStickX, rightStickY);
         }
@@ -1010,8 +1153,10 @@ static __weak ControllerSupport *VLSharedControllerSupport = nil;
     // to main and discard it if the controller disconnected in the meantime.
     if (![NSThread isMainThread]) {
         dispatch_async(dispatch_get_main_queue(), ^{
-            if (self->_isCleaningUp ||
-                [self->_voidControllers objectForKey:@(controller.playerIndex)] != controller) {
+            [self->_controllerStreamLock lock];
+            BOOL isCurrentController = [self voidControllerForGamepadLocked:controller.gamepad] == controller;
+            [self->_controllerStreamLock unlock];
+            if (self->_isCleaningUp || !isCurrentController) {
                 return;
             }
             [self initializeControllerBattery:controller];
@@ -1043,7 +1188,7 @@ static __weak ControllerSupport *VLSharedControllerSupport = nil;
                             break;
                     }
                     
-                    LiSendControllerBatteryEvent(controller.playerIndex, batteryState, (uint8_t)(controller.gamepad.battery.batteryLevel * 100));
+            LiSendControllerBatteryEvent(controller.streamPlayerIndex, batteryState, (uint8_t)(controller.gamepad.battery.batteryLevel * 100));
                     
                     controller.lastBatteryState = (ControllerDeviceBatteryState)controller.gamepad.battery.batteryState;
                     controller.lastBatteryLevel = controller.gamepad.battery.batteryLevel;
@@ -1078,9 +1223,21 @@ static __weak ControllerSupport *VLSharedControllerSupport = nil;
             }
         }
 
-        // Generic adapter endpoints are reserved in physical port order, but
-        // only become active in the host mask after that port sends real input.
-        _controllerNumbers |= (1 << voidController.playerIndex);
+        // Slot order follows first button press, not GameController's device
+        // enumeration order. Empty adapter ports never reserve a host slot.
+        if (![self assignStreamPlayerIndexLocked:voidController]) return NO;
+        _controllerNumbers |= (1 << voidController.streamPlayerIndex);
+
+        if (voidController.streamPlayerIndex == 0) {
+            voidController.mergedWithController = _oscController;
+            _oscController.mergedWithController = voidController;
+        }
+        else {
+            voidController.mergedWithController = nil;
+            if (_oscController.mergedWithController == voidController) {
+                _oscController.mergedWithController = nil;
+            }
+        }
     }
     
     /*
@@ -1099,7 +1256,7 @@ static __weak ControllerSupport *VLSharedControllerSupport = nil;
     if (controller) {
         // This is a physical controller with a corresponding GCController object
         
-        [_delegate controllerArrivalWithPlayerIndex:voidController.playerIndex];
+        [_delegate controllerArrivalWithPlayerIndex:voidController.streamPlayerIndex];
         
         // Start is always present
         supportedButtonFlags |= PLAY_FLAG;
@@ -1137,7 +1294,7 @@ static __weak ControllerSupport *VLSharedControllerSupport = nil;
 
                 uint8_t configuredType = _streamConfig.emulatedControllerType;
                 if (configuredType == ControllerEmulationXboxAndPs) {
-                    type = voidController.playerIndex == 0 ? LI_CTYPE_PS : LI_CTYPE_XBOX;
+                    type = voidController.streamPlayerIndex == 0 ? LI_CTYPE_PS : LI_CTYPE_XBOX;
                 }
                 else if (configuredType == ControllerEmulationPsEnhancedHaptic) {
                     type = LI_CTYPE_PS;
@@ -1221,16 +1378,16 @@ static __weak ControllerSupport *VLSharedControllerSupport = nil;
             }
             
             // LI_CTYPE_UNKNOWN for option "Both"
-            if(voidController.playerIndex == 0){
+            if(voidController.streamPlayerIndex == 0){
                 type = _streamConfig.emulatedControllerType == ControllerEmulationXboxAndPs ? LI_CTYPE_PS : _streamConfig.emulatedControllerType;
                 if(type == ControllerEmulationPsEnhancedHaptic) type = ControllerEmulationPs;
             }
             
-            if(voidController.playerIndex == 1 && _streamConfig.emulatedControllerType == LI_CTYPE_UNKNOWN){
+            if(voidController.streamPlayerIndex == 1 && _streamConfig.emulatedControllerType == LI_CTYPE_UNKNOWN){
                 type = LI_CTYPE_XBOX;
             }
             
-            if(voidController.playerIndex >= 1 && _streamConfig.emulatedControllerType != LI_CTYPE_UNKNOWN){
+            if(voidController.streamPlayerIndex >= 1 && _streamConfig.emulatedControllerType != LI_CTYPE_UNKNOWN){
                 if ([controller.extendedGamepad isKindOfClass:[GCXboxGamepad class]]) {
                     type = LI_CTYPE_XBOX;
                 }
@@ -1297,7 +1454,7 @@ static __weak ControllerSupport *VLSharedControllerSupport = nil;
         if (controller.extendedGamepad == nil) {
             uint8_t configuredType = _streamConfig.emulatedControllerType;
             if (configuredType == ControllerEmulationXboxAndPs) {
-                type = voidController.playerIndex == 0 ? LI_CTYPE_PS : LI_CTYPE_XBOX;
+                type = voidController.streamPlayerIndex == 0 ? LI_CTYPE_PS : LI_CTYPE_XBOX;
             }
             else if (configuredType == ControllerEmulationPsEnhancedHaptic) {
                 type = LI_CTYPE_PS;
@@ -1333,25 +1490,27 @@ static __weak ControllerSupport *VLSharedControllerSupport = nil;
     // Report the new controller to the host
     // NB: This will fail if the connection hasn't been fully established yet
     // and we will try again later.
-    if (LiSendControllerArrivalEvent(controller.playerIndex,
+    if (LiSendControllerArrivalEvent(voidController.streamPlayerIndex,
                                      [self getActiveGamepadMask],
                                      type,
                                      supportedButtonFlags,
                                      capabilities) != 0) {
         if (voidController.waitsForInputBeforeArrival) {
-            _controllerNumbers &= ~(1 << voidController.playerIndex);
+            _controllerNumbers &= ~(1 << voidController.streamPlayerIndex);
         }
         return NO;
     }
     
     // Begin polling for battery status
-    [self initializeControllerBattery:voidController];
-    
     // Remember that we've reported arrival already
     voidController.reportedArrival = YES;
     if (voidController.waitsForInputBeforeArrival) {
-        _reservedControllerNumbers &= ~(1 << voidController.playerIndex);
+        _reservedControllerNumbers &= ~(1 << voidController.streamPlayerIndex);
     }
+    Log(LOG_I, @"Assigned %@ to Sunshine P%d on first button press",
+        voidController.gamepad.vendorName ?: @"controller",
+        voidController.streamPlayerIndex + 1);
+    [self initializeControllerBattery:voidController];
     return YES;
 }
 
@@ -1366,6 +1525,7 @@ static __weak ControllerSupport *VLSharedControllerSupport = nil;
 
 -(void) handleControllerTouchpad:(VoidController*)controller x:(float)x y:(float)y active:(BOOL)isActive index:(int)index
 {
+    if (!controller.reportedArrival || controller.streamPlayerIndex < 0) return;
     controller_touch_context_t context = index == 0 ? controller.primaryTouch : controller.secondaryTouch;
     
     // This magic is courtesy of SDL
@@ -1374,16 +1534,16 @@ static __weak ControllerSupport *VLSharedControllerSupport = nil;
     
     // If we went from a touch to no touch, generate a touch up event
     if (context.isActive && !isActive) {
-        LiSendControllerTouchEvent(controller.playerIndex, LI_TOUCH_EVENT_UP, index, normalizedX, normalizedY, 1.0f);
+        LiSendControllerTouchEvent(controller.streamPlayerIndex, LI_TOUCH_EVENT_UP, index, normalizedX, normalizedY, 1.0f);
     }
     else if (isActive) {
         // If we went from no touch to a touch, generate a touch down event
         if (!context.isActive) {
-            LiSendControllerTouchEvent(controller.playerIndex, LI_TOUCH_EVENT_DOWN, index, normalizedX, normalizedY, 1.0f);
+        LiSendControllerTouchEvent(controller.streamPlayerIndex, LI_TOUCH_EVENT_DOWN, index, normalizedX, normalizedY, 1.0f);
         }
         else if (context.lastX != x || context.lastY != y) {
             // Otherwise it's just a move
-            LiSendControllerTouchEvent(controller.playerIndex, LI_TOUCH_EVENT_MOVE, index, normalizedX, normalizedY, 1.0f);
+        LiSendControllerTouchEvent(controller.streamPlayerIndex, LI_TOUCH_EVENT_MOVE, index, normalizedX, normalizedY, 1.0f);
         }
     }
     
@@ -1484,7 +1644,7 @@ double rc_expo(double x, double expo) {
         if (context.isActive) {
             float normalizedX = (1.0f + context.lastX) * 0.5f;
             float normalizedY = 1.0f - (1.0f + context.lastY) * 0.5f;
-            LiSendControllerTouchEvent((uint8_t)controller.playerIndex, LI_TOUCH_EVENT_UP,
+            LiSendControllerTouchEvent((uint8_t)controller.streamPlayerIndex, LI_TOUCH_EVENT_UP,
                                        (uint32_t)index, normalizedX, normalizedY, 1.0f);
         }
 
@@ -1525,7 +1685,9 @@ double rc_expo(double x, double expo) {
 - (void)sendNavigationButtonPress {
     if(!ControllerUtil.primaryGCController) return;
     if(@available(iOS 13.0, *)) if(ControllerNavigator.controllerMouseEnabled) return;
-    VoidController* voidController = [self->_voidControllers objectForKey:@(ControllerUtil.primaryGCController.playerIndex)];
+    [self->_controllerStreamLock lock];
+    VoidController* voidController = [self voidControllerForGamepadLocked:ControllerUtil.primaryGCController];
+    [self->_controllerStreamLock unlock];
     int radialMenuButton = ControllerElementNull;
     if (@available(iOS 13.0, *)) radialMenuButton = ControllerNavigator.radialMenuButton;
     [self setButtonFlag:voidController flags:(int)radialMenuButton];
@@ -1577,12 +1739,14 @@ double rc_expo(double x, double expo) {
     
     [ControllerUtil listenWithController:controller swapABXY:self->_swapABXYButtons handler:^(NSDictionary *elementDict, GCExtendedGamepad *gamepad, GCControllerElement *element) {
         VoidController *voidController = nil;
+        NSUInteger orderGeneration = 0;
         [self->_controllerStreamLock lock];
-        voidController = [self->_voidControllers objectForKey:@(controller.playerIndex)];
+        voidController = [self voidControllerForGamepadLocked:controller];
         [self->_controllerStreamLock unlock];
         if (voidController == nil) return;
         @synchronized (voidController) {
             if (!voidController.acceptsInput || voidController.gamepad != controller) return;
+            orderGeneration = voidController.inputOrderGeneration;
         }
 
         // Snapshot GameController values before queueing, just like the generic
@@ -1596,6 +1760,15 @@ double rc_expo(double x, double expo) {
             }
         }
         NSDictionary<NSNumber *, NSNumber *> *buttonStates = [capturedButtonStates copy];
+        BOOL hasPressedButton = NO;
+        for (NSNumber *elementFlagId in buttonStates) {
+            if (!buttonStates[elementFlagId].boolValue) continue;
+            int buttonFlag = elementFlagId.intValue;
+            if (buttonFlag != ControllerElementLeftTrigger && buttonFlag != ControllerElementRightTrigger) {
+                hasPressedButton = YES;
+                break;
+            }
+        }
 
         CGFloat leftX = gamepad.leftThumbstick.xAxis.value;
         CGFloat leftY = gamepad.leftThumbstick.yAxis.value;
@@ -1634,7 +1807,14 @@ double rc_expo(double x, double expo) {
         BOOL isPrimaryController = controller == ControllerUtil.primaryGCController;
         dispatch_async(self->_controllerInputQueue, ^{
             @synchronized (voidController) {
-                if (!voidController.acceptsInput || voidController.gamepad != controller) return;
+                if (!voidController.acceptsInput || voidController.gamepad != controller ||
+                    voidController.inputOrderGeneration != orderGeneration) return;
+                if (voidController.requiresButtonReleaseAfterOrderReset) {
+                    if (!hasPressedButton) voidController.requiresButtonReleaseAfterOrderReset = NO;
+                }
+                else if (!voidController.hasReceivedInput && hasPressedButton) {
+                    voidController.hasReceivedInput = YES;
+                }
             }
 
             for (NSNumber *elementFlagId in buttonStates) {
@@ -1661,7 +1841,7 @@ double rc_expo(double x, double expo) {
             short rightStickX = (short)rightOffset.dx;
             short rightStickY = (short)rightOffset.dy;
 
-            if (voidController.playerIndex == 0
+            if (voidController.streamPlayerIndex == 0
                 && [self useMotionHandler]
                 && self->motionHandler.motionControlStarted
                 && self->oscProfile.mapGyroTo == mapGyroToControllerStick
@@ -1670,12 +1850,12 @@ double rc_expo(double x, double expo) {
                 [self->motionHandler mixPhysicalRightStickAndGyroInputWithX:rightStickX y:rightStickY];
             }
             else {
-                [self updateRightStick:(voidController.playerIndex == 0 ? self->_oscController : voidController)
+                [self updateRightStick:(voidController.streamPlayerIndex == 0 ? self->_oscController : voidController)
                                      x:rightStickX
                                      y:rightStickY];
             }
 
-            if (voidController.playerIndex == 0
+            if (voidController.streamPlayerIndex == 0
                 && [self useMotionHandler]
                 && self->motionHandler.motionControlStarted
                 && self->oscProfile.mapGyroTo == mapGyroToControllerStick
@@ -1684,7 +1864,7 @@ double rc_expo(double x, double expo) {
                 [self->motionHandler mixPhysicalLeftStickAndGyroInputWithX:leftStickX y:leftStickY];
             }
             else {
-                [self updateLeftStick:(voidController.playerIndex == 0 ? self->_oscController : voidController)
+                [self updateLeftStick:(voidController.streamPlayerIndex == 0 ? self->_oscController : voidController)
                                     x:leftStickX
                                     y:leftStickY];
             }
@@ -1698,15 +1878,17 @@ double rc_expo(double x, double expo) {
 }
 
 - (void) listenToGenericGCController:(GCController*) controller API_AVAILABLE(ios(16.0), tvos(16.0)) {
-    [ControllerUtil listenPhysicalProfileWithController:controller
-                                            swapABXY:self->_swapABXYButtons
-                                              handler:^(NSDictionary *elementDict, GCPhysicalInputProfile *profile) {
+     [ControllerUtil listenPhysicalProfileWithController:controller
+                                             swapABXY:self->_swapABXYButtons
+                                               handler:^(NSDictionary *elementDict, GCPhysicalInputProfile *profile) {
+        NSUInteger orderGeneration = 0;
         [self->_controllerStreamLock lock];
-        VoidController *voidController = [self->_voidControllers objectForKey:@(controller.playerIndex)];
+        VoidController *voidController = [self voidControllerForGamepadLocked:controller];
         [self->_controllerStreamLock unlock];
         if (voidController == nil) return;
         @synchronized (voidController) {
             if (!voidController.acceptsInput || voidController.gamepad != controller) return;
+            orderGeneration = voidController.inputOrderGeneration;
         }
 
         // Game Controller callbacks run on the controller's handler queue. Copy
@@ -1720,7 +1902,10 @@ double rc_expo(double x, double expo) {
 
             BOOL pressed = ((GCControllerButtonInput *)mappedElement).pressed;
             capturedButtonStates[elementFlagId] = @(pressed);
-            hasPressedButton |= pressed;
+            int buttonFlag = elementFlagId.intValue;
+            if (pressed && buttonFlag != ControllerElementLeftTrigger && buttonFlag != ControllerElementRightTrigger) {
+                hasPressedButton = YES;
+            }
         }
 
         GCControllerDirectionPad *leftStick = profile.dpads[GCInputLeftThumbstick];
@@ -1766,11 +1951,6 @@ double rc_expo(double x, double expo) {
             secondaryTouchActive = secondaryTouchX != 0 || secondaryTouchY != 0;
         }
 
-        BOOL hasMeaningfulInput = hasPressedButton
-            || fabs(leftX) >= 0.15 || fabs(leftY) >= 0.15
-            || fabs(rightX) >= 0.15 || fabs(rightY) >= 0.15
-            || leftTrigger >= 13 || rightTrigger >= 13
-            || primaryTouchActive || secondaryTouchActive;
         NSDictionary<NSNumber *, NSNumber *> *buttonStates = [capturedButtonStates copy];
 
         int radialMenuButton = ControllerElementNull;
@@ -1783,14 +1963,15 @@ double rc_expo(double x, double expo) {
 
         dispatch_async(self->_controllerInputQueue, ^{
             @synchronized (voidController) {
-                if (!voidController.acceptsInput || voidController.gamepad != controller) return;
-            }
-            if (hasMeaningfulInput) {
-                @synchronized (voidController) {
+                if (!voidController.acceptsInput || voidController.gamepad != controller ||
+                    voidController.inputOrderGeneration != orderGeneration) return;
+                if (voidController.requiresButtonReleaseAfterOrderReset) {
+                    if (!hasPressedButton) voidController.requiresButtonReleaseAfterOrderReset = NO;
+                }
+                else if (!voidController.hasReceivedInput && hasPressedButton) {
                     voidController.hasReceivedInput = YES;
                 }
             }
-
             for (NSNumber *elementFlagId in buttonStates) {
                 BOOL pressed = buttonStates[elementFlagId].boolValue;
                 int buttonFlag = elementFlagId.intValue;
@@ -1819,7 +2000,7 @@ double rc_expo(double x, double expo) {
             short rightStickX = (short)rightOffset.dx;
             short rightStickY = (short)rightOffset.dy;
 
-            if (voidController.playerIndex == 0
+            if (voidController.streamPlayerIndex == 0
                 && [self useMotionHandler]
                 && self->motionHandler.motionControlStarted
                 && self->oscProfile.mapGyroTo == mapGyroToControllerStick
@@ -1828,12 +2009,12 @@ double rc_expo(double x, double expo) {
                 [self->motionHandler mixPhysicalRightStickAndGyroInputWithX:rightStickX y:rightStickY];
             }
             else {
-                [self updateRightStick:(voidController.playerIndex == 0 ? self->_oscController : voidController)
+                [self updateRightStick:(voidController.streamPlayerIndex == 0 ? self->_oscController : voidController)
                                      x:rightStickX
                                      y:rightStickY];
             }
 
-            if (voidController.playerIndex == 0
+            if (voidController.streamPlayerIndex == 0
                 && [self useMotionHandler]
                 && self->motionHandler.motionControlStarted
                 && self->oscProfile.mapGyroTo == mapGyroToControllerStick
@@ -1842,7 +2023,7 @@ double rc_expo(double x, double expo) {
                 [self->motionHandler mixPhysicalLeftStickAndGyroInputWithX:leftStickX y:leftStickY];
             }
             else {
-                [self updateLeftStick:(voidController.playerIndex == 0 ? self->_oscController : voidController)
+                [self updateLeftStick:(voidController.streamPlayerIndex == 0 ? self->_oscController : voidController)
                                     x:leftStickX
                                     y:leftStickY];
             }
@@ -1909,7 +2090,10 @@ double rc_expo(double x, double expo) {
         
         if (useLegacyPausedHandler) {
             controller.controllerPausedHandler = ^(GCController *controller) {
-                VoidController* voidController = [self->_voidControllers objectForKey:[NSNumber numberWithInteger:controller.playerIndex]];
+                [self->_controllerStreamLock lock];
+                VoidController* voidController = [self voidControllerForGamepadLocked:controller];
+                [self->_controllerStreamLock unlock];
+                if (voidController == nil) return;
                 
                 // Get off the main thread
                 dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
@@ -2101,23 +2285,14 @@ double rc_expo(double x, double expo) {
     [self updateAutoOnScreenControlMode];
 }
 
--(VoidController* )controllerHasBeenAssignedDeprecated:(GCController*)controller{
-    if(controller.playerIndex == 0) return nil;
-    if(controller.playerIndex > 0){
-            for(VoidController* voidController in _voidControllers){
-                if(voidController.gamepad == controller) return voidController;
-            }
-    }
-    return nil;
-}
-
-
 - (void)updateVoidController:(VoidController* )voidController withGCController:(GCController* )controller{
     //voidController.playerIndex = controller.playerIndex == -1 ? 0 : (uint8_t) controller.playerIndex;
     voidController.motionTypes = [[NSMutableSet alloc] init];
     voidController.supportedEmulationFlags = EMULATING_SPECIAL | EMULATING_SELECT;
     voidController.gamepad = controller;
-    voidController.waitsForInputBeforeArrival = controller.extendedGamepad == nil;
+    // Every physical device waits for a deliberate button press before taking
+    // a Sunshine port. This also covers ordinary Bluetooth gamepads.
+    voidController.waitsForInputBeforeArrival = YES;
 #if !TARGET_OS_TV
     if ([GameSirG8MFiRumbler isTargetController:controller]) {
         voidController.hardware = ControllerHardwareG8PlusMFi;
@@ -2146,16 +2321,11 @@ double rc_expo(double x, double expo) {
         }
     }
 
-    // Only player 0 shares state with the OSC.
-    if (voidController.playerIndex == 0) {
-        voidController.mergedWithController = _oscController;
-        _oscController.mergedWithController = voidController;
-    }
-    else {
-        voidController.mergedWithController = nil;
-        if (_oscController.mergedWithController == voidController) {
-            _oscController.mergedWithController = nil;
-        }
+    // The OSC merge is selected when this device receives Sunshine port 0.
+    // Connection order and adapter endpoint order must not decide that.
+    voidController.mergedWithController = nil;
+    if (_oscController.mergedWithController == voidController) {
+        _oscController.mergedWithController = nil;
     }
     
     if (@available(iOS 13.0, tvOS 13.0, *)) {
@@ -2188,59 +2358,39 @@ double rc_expo(double x, double expo) {
 }
 
 -(VoidController* )assignController:(GCController*)controller {
-    NSLog(@"run assignController");
-
     // Callers hold _controllerStreamLock so slot allocation cannot race event masks.
-    bool newGCControllerArrival = ![ControllerUtil.activeStreamingGCControllers containsObject:controller];
-    
-    if(!newGCControllerArrival){
-        VoidController* voidController = [_voidControllers objectForKey:@(controller.playerIndex)];
-        if(!voidController) {
-            voidController = [[VoidController alloc] init];
-        }
+    VoidController* existingController = [self voidControllerForGamepadLocked:controller];
+    if (existingController != nil) {
+        VoidController* voidController = existingController;
         @synchronized (voidController) {
             voidController.acceptsInput = YES;
         }
         [self updateVoidController:voidController withGCController:controller];
-        [_voidControllers setObject:voidController forKey:[NSNumber numberWithInteger:voidController.playerIndex]];
         return voidController;
     }
-    
-    // extenal controller start from playerIndex 1 for option "Both"
-    int startPlayIndex = _streamConfig.emulatedControllerType == LI_CTYPE_UNKNOWN ? 1 : 0;
-    
-    for (int i = startPlayIndex; i < 4; i++) {
-        int slotBit = (1 << i);
-        if (!((_controllerNumbers | _reservedControllerNumbers) & slotBit)) {
-            BOOL waitsForInput = controller.extendedGamepad == nil;
-            if (waitsForInput) {
-                _reservedControllerNumbers |= slotBit;
-            }
-            else {
-                _controllerNumbers |= slotBit;
-            }
-            
-            VoidController* voidController = [[VoidController alloc] init];
 
-
-            [ControllerUtil.activeStreamingGCControllers addObject:controller];
-            controller.playerIndex = i;
-            voidController.playerIndex = i;
-            @synchronized (voidController) {
-                voidController.acceptsInput = YES;
-            }
-            [self updateVoidController:voidController withGCController:controller];
-            
-            [_voidControllers setObject:voidController forKey:[NSNumber numberWithInteger:controller.playerIndex]];
-            
-            Log(LOG_I, @"Assigning controller index: %d", i);
-            
-            return voidController;
-            
-        }
+    // Use a local key only for bookkeeping. Empty generic adapter endpoints may
+    // outnumber Sunshine's four remote ports, so local keys do not consume them.
+    int localIndex = 0;
+    while (localIndex < 32 && [_voidControllers objectForKey:@(localIndex)] != nil) localIndex++;
+    if (localIndex >= 32) {
+        Log(LOG_W, @"Too many local game controller endpoints; ignoring %@", controller.vendorName ?: @"controller");
+        return nil;
     }
-    
-    return nil;
+
+    VoidController* voidController = [[VoidController alloc] init];
+    voidController.playerIndex = localIndex;
+    voidController.streamPlayerIndex = -1;
+    @synchronized (voidController) {
+        voidController.acceptsInput = YES;
+    }
+    [ControllerUtil.activeStreamingGCControllers addObject:controller];
+    if (localIndex < 4) controller.playerIndex = localIndex;
+    [self updateVoidController:voidController withGCController:controller];
+    [_voidControllers setObject:voidController forKey:@(localIndex)];
+
+    Log(LOG_I, @"Tracking controller endpoint locally as %d; waiting for its first button press", localIndex);
+    return voidController;
 }
 
 -(VoidController*) getOscController {
@@ -2282,27 +2432,9 @@ double rc_expo(double x, double expo) {
 }
 
 +(int) getConnectedGamepadMask:(StreamConfiguration*)streamConfig {
-    int mask = 0;
-    
-    if (streamConfig.multiController) {
-        // Keep the startup mask aligned with assignController's slot order.
-        // Generic-profile adapters can expose empty endpoints, so reserve their
-        // positions but don't advertise them to Sunshine until they send input.
-        int playerIndex = streamConfig.emulatedControllerType == LI_CTYPE_UNKNOWN ? 1 : 0;
-        for (GCController* controller in [GCController controllers]) {
-            if ([ControllerSupport isSupportedGamepad:controller]) {
-                if (controller.extendedGamepad != nil && playerIndex < 4) {
-                    mask |= 1 << playerIndex;
-                }
-                playerIndex++;
-            }
-        }
-    }
-    else {
-        // Some games don't deal with having controller reconnected
-        // properly so always report controller 1 if not in MC mode
-        mask = 0x1;
-    }
+    // Physical controller ports arrive on a deliberate button press. Preserve
+    // the legacy single-pad startup bit; multi-pad starts with no physical pads.
+    int mask = streamConfig.multiController ? 0 : 0x1;
     
     DataManager* dataMan = [[DataManager alloc] init];
     TemporarySettings* settings = [dataMan getSettings];
@@ -2320,7 +2452,11 @@ double rc_expo(double x, double expo) {
 
 -(NSUInteger) getConnectedGamepadCount
 {
-    return _voidControllers.count;
+    NSUInteger count = 0;
+    for (VoidController* controller in _voidControllers.allValues) {
+        if (controller.reportedArrival) count++;
+    }
+    return count;
 }
 
 - (void)assignControllers{
@@ -2331,9 +2467,9 @@ double rc_expo(double x, double expo) {
         if ([ControllerSupport isSupportedGamepad:controller]) {
             NSLog(@"controller count: is supported,is contained by dict: %d", [ControllerUtil.activeStreamingGCControllers containsObject:controller]);
                 NSLog(@"controller obj +1 in dic");
-                [self assignController:controller];
+                VoidController* assignedController = [self assignController:controller];
                 NSLog(@"controller obj num in dict: %lu", (unsigned long)_voidControllers.allValues.count);
-                [self registerControllerCallbacks:controller];
+                if (assignedController) [self registerControllerCallbacks:controller];
             // Note: We cannot report controller arrival to the host here,
             // because the connection has not been established yet.play
         }
@@ -2353,6 +2489,7 @@ double rc_expo(double x, double expo) {
     _swapABXYButtons = streamConfig.swapABXYButtons;
 
     _oscController.playerIndex = 0;
+    _oscController.streamPlayerIndex = 0;
 
     oscProfile = [oscProfileMan getSelectedProfile];
     motionHandler = [MotionHandler sharedWithProfile:oscProfile];
@@ -2504,7 +2641,7 @@ double rc_expo(double x, double expo) {
 
 
         [self->_controllerStreamLock lock];
-        VoidController* voidController = [self->_voidControllers objectForKey:@(controller.playerIndex)];
+        VoidController* voidController = [self voidControllerForGamepadLocked:controller];
         if (voidController != nil) {
             @synchronized (voidController) {
                 voidController.acceptsInput = NO;
@@ -2515,8 +2652,8 @@ double rc_expo(double x, double expo) {
         [self unregisterControllerCallbacks:controller];
         // Finish already-captured controller input before its player slot can be reused.
         dispatch_sync(self->_controllerInputQueue, ^{});
-        if (voidController && controller.extendedGamepad == nil) {
-            if (voidController.playerIndex == 0) {
+        if (voidController && voidController.reportedArrival) {
+            if (voidController.streamPlayerIndex == 0) {
                 [self->motionHandler resetPhysicalStickInputs];
             }
 
@@ -2537,16 +2674,18 @@ double rc_expo(double x, double expo) {
             }
         }
 
-        [self resetGyroSwitchForPlayerIndex:controller.playerIndex];
+        if (voidController) [self resetGyroSwitchForPlayerIndex:voidController.playerIndex];
         
         if([ControllerUtil.activeStreamingGCControllers containsObject:controller]){
             [ControllerUtil.activeStreamingGCControllers removeObject:controller];
             [self->_controllerStreamLock lock];
-            self->_controllerNumbers &= ~(1 << controller.playerIndex);
-            self->_reservedControllerNumbers &= ~(1 << controller.playerIndex);
+            if (voidController.streamPlayerIndex >= 0) {
+                self->_controllerNumbers &= ~(1 << voidController.streamPlayerIndex);
+                self->_reservedControllerNumbers &= ~(1 << voidController.streamPlayerIndex);
+            }
             [self->_controllerStreamLock unlock];
         }
-        Log(LOG_I, @"Unassigning controller index: %ld", (long)controller.playerIndex);
+        Log(LOG_I, @"Unassigning controller endpoint %ld from Sunshine port %d", (long)(voidController ? voidController.playerIndex : -1), voidController ? voidController.streamPlayerIndex : -1);
 
         if (voidController) {
 #if !TARGET_OS_TV
@@ -2585,7 +2724,7 @@ double rc_expo(double x, double expo) {
             //[self updateAutoOnScreenControlMode];
             
             [self->_controllerStreamLock lock];
-            [self->_voidControllers removeObjectForKey:@(controller.playerIndex)];
+            [self->_voidControllers removeObjectForKey:@(voidController.playerIndex)];
             [self->_controllerStreamLock unlock];
             
             if((self->_voidControllers.allValues.count == 0 || ![self externalControllersHaveGyro]) && self->_gyroMode == GyroModeAuto) [self updateTimerStateForController:self->_oscController];
@@ -2688,7 +2827,7 @@ double rc_expo(double x, double expo) {
 
 -(void)connectionEstablished {
     for (VoidController* voidController in _voidControllers.allValues) {
-        if(voidController.playerIndex != 0) [self updateFinished:voidController];
+        if (voidController.waitsForInputBeforeArrival) [self updateFinished:voidController];
     }
     
     //if (_oscEnabled

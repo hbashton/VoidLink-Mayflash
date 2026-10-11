@@ -17184,6 +17184,29 @@
         }
       }
     },
+    "Press controllers in the order you want them assigned" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "按想要分配的顺序按下控制器"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "按想要指派的順序按下控制器"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "按想要指派的順序按下控制器"
+          }
+        }
+      }
+    },
     "Press a button for keeping gyro active by holding down.\nYou can have 2 buttons for both press-toggle & hold-down switch." : {
       "extractionState" : "manual",
       "localizations" : {
@@ -18549,6 +18572,29 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "重置"
+          }
+        }
+      }
+    },
+    "Reset Controller Order" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "重置控制器顺序"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "重設控制器順序"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "重設控制器順序"
           }
         }
       }

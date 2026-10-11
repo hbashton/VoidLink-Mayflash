@@ -27,6 +27,7 @@ import UIKit
     case exit
     case toolbox
     case textInput
+    case resetControllerOrder
 }
 
 @objc public enum RadialMenuState:Int {

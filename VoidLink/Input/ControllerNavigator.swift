@@ -582,6 +582,11 @@ final class ControllerNavigator: NSObject {
             }
         case .textInput:
             StreamFrameViewController.sharedInstance().remoteTextInputForTvOS()
+        case .resetControllerOrder:
+            ControllerSupport.sharedInstance()?.resetControllerOrder()
+            radialMenuView?.dismiss()
+            radialMenuView = nil
+            radialMenuState = .main
         case .theme:
             let targetTheme: UIUserInterfaceStyle = ThemeManager.userInterfaceStyle() == .light ? .dark : .light
             DispatchQueue.main.async {
@@ -695,6 +700,7 @@ final class ControllerNavigator: NSObject {
                 if !mainFrameVC.isInAppView(), !mainFrameVC.isStreaming(), !mainFrameVC.settingsViewExpanded {RadialMenuOverlayView.menuSectors.append(RadialMenuSector(title: "Add Host".localized, subtitle: "", symbol: "plus.circle", item: .addHost))}
                 
                 if mainFrameVC.isStreaming(), !mainFrameVC.settingsExpandedInStreamView {RadialMenuOverlayView.menuSectors.append(RadialMenuSector(title: "Controller Mouse".localized, subtitle: "", symbol: radialMenuState == .mouseModeEnabled ? "disableControllerMouse" : "controllerMouse", item: .mouse))}
+                if mainFrameVC.isStreaming(), !mainFrameVC.settingsExpandedInStreamView {RadialMenuOverlayView.menuSectors.append(RadialMenuSector(title: "Reset Controller Order".localized, subtitle: "Press controllers in the order you want them assigned".localized, symbol: "arrow.counterclockwise.circle", item: .resetControllerOrder))}
                 if mainFrameVC.isStreaming(), !mainFrameVC.settingsExpandedInStreamView {RadialMenuOverlayView.menuSectors.append(RadialMenuSector(title: "Disconnect".localized, subtitle: "", symbol: PublicUtils.disconnectSymbol(), item: .disconnect))}
                 // if mainFrameVC.isStreaming(), !mainFrameVC.settingsExpandedInStreamView {RadialMenuOverlayView.menuSectors.append(RadialMenuSector(title: "Quit App".localized, subtitle: "", symbol: PublicUtils.quitSymbol(), item: .quitApp))}
                 radialMenuView = RadialMenuOverlayView.presentInKeyWindow()

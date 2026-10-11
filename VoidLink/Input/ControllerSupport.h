@@ -86,5 +86,6 @@
 
 -(void) reinitiatePrimaryController;
 -(void)sendNavigationButtonPress;
+-(void)resetControllerOrder;
 
 @end

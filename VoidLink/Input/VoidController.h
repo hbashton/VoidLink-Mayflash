@@ -34,6 +34,8 @@ typedef NS_ENUM(NSInteger, ControllerDeviceBatteryState) {
 
 @property (nullable, nonatomic, retain) GCController* gamepad;
 @property (nonatomic)                   int playerIndex;
+// Host-side port selected by first button press. -1 means not yet announced.
+@property (nonatomic)                   int streamPlayerIndex;
 @property (nonatomic)                   int lastButtonFlags;
 @property (nonatomic)                   int emulatingButtonFlags;
 @property (nonatomic)                   int supportedEmulationFlags;
@@ -70,6 +72,8 @@ typedef NS_ENUM(NSInteger, ControllerDeviceBatteryState) {
 @property (nonatomic)                   BOOL reportedArrival;
 @property (nonatomic)                   BOOL waitsForInputBeforeArrival;
 @property (nonatomic)                   BOOL hasReceivedInput;
+@property (nonatomic)                   BOOL requiresButtonReleaseAfterOrderReset;
+@property (nonatomic)                   NSUInteger inputOrderGeneration;
 @property (nonatomic)                   BOOL acceptsInput;
 @property (nonatomic)                   VoidController* _Nullable mergedWithController;
 
