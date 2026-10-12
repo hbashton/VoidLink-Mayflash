@@ -1165,6 +1165,7 @@ import UIKit
     @objc static func listenPhysicalProfile(
         controller: GCController,
         swapABXY: Bool,
+        handlerQueue: DispatchQueue,
         handler: @escaping (_ elementDict: NSDictionary,
                             _ profile: GCPhysicalInputProfile,
                             _ changedElement: GCControllerElement,
@@ -1205,8 +1206,8 @@ import UIKit
             ] }
         ])
 
-        // Keep profile callbacks on main with the connection and disconnection observers.
-        controller.handlerQueue = DispatchQueue.main
+        // Use the caller's queue so streaming input never waits behind UI work.
+        controller.handlerQueue = handlerQueue
         profile.valueDidChangeHandler = { [weak controller, weak profile] changedProfile, changedElement in
             guard let controller, let liveProfile = profile else { return }
             // Keep the element map tied to the live profile objects used by this

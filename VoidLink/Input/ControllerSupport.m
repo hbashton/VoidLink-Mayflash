@@ -257,6 +257,19 @@ static BOOL triggerValueIsDigitallyPressed(CGFloat value, BOOL wasPressed) {
     return fmin(fmax(value, 0), 1) > threshold;
 }
 
+static char controllerInputQueueSpecificKey;
+
+static void dispatchControllerInputWork(dispatch_queue_t queue, dispatch_block_t work) {
+    // GameController callbacks are delivered directly on this queue while streaming.
+    // Run the snapshot there instead of adding another queue hop. Keep the fallback
+    // for callbacks that arrive from other queues (for example, on older OS versions).
+    if (dispatch_get_specific(&controllerInputQueueSpecificKey) == &controllerInputQueueSpecificKey) {
+        work();
+    } else {
+        dispatch_async(queue, work);
+    }
+}
+
 @interface ControllerSupport()
 
 @property (assign,nonatomic) bool shallDisableGyroHotSwitch;
@@ -1426,6 +1439,10 @@ static BOOL triggerValueIsDigitallyPressed(CGFloat value, BOOL wasPressed) {
         if (controller.extendedGamepad != NULL) {
             controller.extendedGamepad.valueChangedHandler = NULL;
         }
+        if (@available(iOS 14.0, tvOS 14.0, *)) {
+            // Do not leave a completed stream's private queue attached to a device.
+            controller.handlerQueue = dispatch_get_main_queue();
+        }
     }
 }
 
@@ -2184,7 +2201,7 @@ double rc_expo(double x, double expo) {
         if (@available(iOS 13.0, tvOS 13.0, *)) {
             controllerNavigatorEnabled = ControllerNavigator.enabled;
         }
-        dispatch_async(self->_controllerInputQueue, ^{
+        dispatchControllerInputWork(self->_controllerInputQueue, ^{
             recordControllerInputWorkerDequeued(voidController, callbackCapturedAt);
             BOOL newlyClaimedSlot = NO;
             @synchronized (voidController) {
@@ -2315,6 +2332,7 @@ double rc_expo(double x, double expo) {
 - (void) listenToGenericGCController:(GCController*) controller API_AVAILABLE(ios(16.0), tvos(16.0)) {
      [ControllerUtil listenPhysicalProfileWithController:controller
                                              swapABXY:self->_swapABXYButtons
+                                          handlerQueue:self->_controllerInputQueue
                                                handler:^(NSDictionary *elementDict, GCPhysicalInputProfile *profile, GCControllerElement *changedElement, NSString *changedElementName) {
         NSUInteger orderGeneration = 0;
         [self->_controllerStreamLock lock];
@@ -2413,7 +2431,7 @@ double rc_expo(double x, double expo) {
         if (@available(iOS 13.0, tvOS 13.0, *)) {
             controllerNavigatorEnabled = ControllerNavigator.enabled;
         }
-        dispatch_async(self->_controllerInputQueue, ^{
+        dispatchControllerInputWork(self->_controllerInputQueue, ^{
             recordControllerInputWorkerDequeued(voidController, callbackCapturedAt);
             BOOL newlyClaimedSlot = NO;
             @synchronized (voidController) {
@@ -2569,6 +2587,11 @@ double rc_expo(double x, double expo) {
 -(void) registerControllerCallbacks:(GCController*) controller
 {
     if (controller != NULL) {
+        if (@available(iOS 14.0, tvOS 14.0, *)) {
+            // Keep HID callbacks off the main UI queue while a stream is active.
+            controller.handlerQueue = _controllerInputQueue;
+        }
+
         // iOS 13 allows the Start button to behave like a normal button, however
         // older MFi controllers can send an instant down+up event for the start button
         // which means the button will not be down long enough to register on the PC.
@@ -3108,6 +3131,10 @@ double rc_expo(double x, double expo) {
         DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INTERACTIVE, 0);
     _controllerInputQueue = dispatch_queue_create(
         "com.voidlink.controller-input", inputQueueAttributes);
+    dispatch_queue_set_specific(_controllerInputQueue,
+                                &controllerInputQueueSpecificKey,
+                                &controllerInputQueueSpecificKey,
+                                NULL);
     _voidControllers = [[NSMutableDictionary alloc] init];
     [ControllerUtil beginStreamingPrimaryControllerSelection];
     [ControllerUtil.activeStreamingGCControllers removeAllObjects];
