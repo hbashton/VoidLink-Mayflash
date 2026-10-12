@@ -140,7 +140,14 @@ public struct AboutView: View {
                     .font(.footnote.weight(.semibold))
                     .padding(.top, 4)
 
-                    Text("Controller diagnostics stay on this device until you export them.".localized)
+                    Toggle("Record controller diagnostics".localized, isOn: Binding(
+                        get: { ControllerDiagnostics.isEnabled() },
+                        set: { ControllerDiagnostics.setEnabled($0) }
+                    ))
+                    .font(.footnote.weight(.semibold))
+                    .padding(.top, 8)
+
+                    Text("Controller diagnostics are off by default. Turn them on before reproducing an issue, then export the file here.".localized)
                         .font(.caption2)
                         .foregroundColor(.gray)
                         .multilineTextAlignment(.center)

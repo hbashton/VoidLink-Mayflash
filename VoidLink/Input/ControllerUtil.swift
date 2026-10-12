@@ -11,6 +11,7 @@ import GameController
 import Combine
 import CoreGraphics
 import Foundation
+import QuartzCore
 #if os(iOS) && !VOIDLINK_PREVIEW
 import SwiftUI
 import UIKit
@@ -1154,7 +1155,7 @@ import UIKit
             if #available(iOS 13.0, *) {
                 // print("controller.playerIndex \(controller.playerIndex)")
                 if controller.playerIndex == .index1 {
-                    GamepadOverlayStateCenter.shared.publish(snapshot: GamepadOverlaySnapshot(gamepad: gamepad))
+                    GamepadOverlayStateCenter.shared.publish(gamepad: gamepad)
                 }
             }
 #endif
@@ -1216,9 +1217,7 @@ import UIKit
             let changedName = elementNamesByIdentity[ObjectIdentifier(changedElement)]
             handler(liveElementDictionary, liveProfile, changedElement, changedName as NSString?)
             if controller.playerIndex == .index1 {
-                GamepadOverlayStateCenter.shared.publish(
-                    snapshot: GamepadOverlaySnapshot(profile: changedProfile.capture())
-                )
+                GamepadOverlayStateCenter.shared.publish(profile: changedProfile)
             }
         }
     }
@@ -1423,6 +1422,9 @@ import UIKit
     @objc static weak var primaryGCController: GCController?
     static var primaryControllerElementMap: [ControllerElement : GCControllerElement]?
     private static var primaryControllerAxisStates: [ControllerElement : ComparisonResult] = [:]
+    private static let primaryControllerAxisStateLock = NSLock()
+    private static let primaryControllerNavigationListenerLock = NSLock()
+    private static var primaryControllerNavigationListenerGenerations: [ControllerElement: UInt64] = [:]
     static let triggerDeadzoneDefaultsKey = "controllerTriggerDeadzone"
     static let defaultTriggerDeadzone: CGFloat = 0.20
     @objc static var controllerTriggerDeadzone: CGFloat {
@@ -1681,28 +1683,34 @@ import UIKit
 
     @objc static func stopListeningPrimaryController(stopListenToRadialMenuButton: Bool = false) {
         guard let primaryControllerButtonMap = primaryControllerElementMap else { return }
-        for gcElement in primaryControllerButtonMap.values {
+        for (logicalElement, gcElement) in primaryControllerButtonMap {
             if let gcButton = gcElement as? GCControllerButtonInput {
                 if #available(iOS 13.0, *) {
                     if !stopListenToRadialMenuButton, gcButton === primaryControllerButtonMap[ControllerNavigator.radialMenuButton] as? GCControllerButtonInput {continue}
                 }
+                invalidateControllerNavigationListener(for: logicalElement)
                 gcButton.pressedChangedHandler = nil
                 gcButton.valueChangedHandler = nil
             }
             if let gcStick = gcElement as? GCControllerDirectionPad {
+                invalidateControllerNavigationListener(for: logicalElement)
                 gcStick.valueChangedHandler = nil
             }
             if let gcAxis = gcElement as? GCControllerAxisInput {
+                invalidateControllerNavigationListener(for: logicalElement)
                 gcAxis.valueChangedHandler = nil
             }
         }
+        primaryControllerAxisStateLock.lock()
         primaryControllerAxisStates.removeAll()
+        primaryControllerAxisStateLock.unlock()
         primaryGCController?.extendedGamepad?.valueChangedHandler = nil
         // ControllerSupport owns physicalInputProfile.valueDidChangeHandler for streaming.
     }
 
     @objc static func stopListeningPrimaryControllerButton(_ button: ControllerElement) {
         guard let input = primaryControllerElementMap?[button] as? GCControllerButtonInput else { return }
+        invalidateControllerNavigationListener(for: button)
         input.pressedChangedHandler = nil
         input.valueChangedHandler = nil
     }
@@ -1725,21 +1733,32 @@ import UIKit
                 }
             }
             if let gcButton = elementMap[button] as? GCControllerButtonInput {
+                let listenerGeneration = advanceControllerNavigationListenerGeneration(for: button)
                 if button == .leftTrigger || button == .rightTrigger {
                     var triggerWasPressed = false
+                    let triggerStateLock = NSLock()
                     gcButton.valueChangedHandler = { _, value, _ in
                         let pressThreshold = controllerTriggerDeadzone
                         let releaseThreshold = pressThreshold * 0.8
+                        triggerStateLock.lock()
                         let triggerIsPressed = triggerWasPressed
                             ? CGFloat(value) > releaseThreshold
                             : CGFloat(value) > pressThreshold
-                        guard triggerIsPressed != triggerWasPressed else { return }
+                        guard triggerIsPressed != triggerWasPressed else {
+                            triggerStateLock.unlock()
+                            return
+                        }
                         triggerWasPressed = triggerIsPressed
-                        handler(triggerIsPressed)
+                        triggerStateLock.unlock()
+                        dispatchControllerNavigationEventToMain(for: button, generation: listenerGeneration) {
+                            handler(triggerIsPressed)
+                        }
                     }
                 } else {
                     gcButton.pressedChangedHandler = { _, _, pressed in
-                        handler(pressed)
+                        dispatchControllerNavigationEventToMain(for: button, generation: listenerGeneration) {
+                            handler(pressed)
+                        }
                     }
                 }
             }
@@ -1749,8 +1768,12 @@ import UIKit
     @objc static func listenPrimaryControllerStick(_ stick: ControllerElement, handler: @escaping (_ offsetVector: CGVector) -> Void){
         if let elementMap = ControllerUtil.primaryControllerElementMap {
             if let gcStick = elementMap[stick] as? GCControllerDirectionPad {
+                let listenerGeneration = advanceControllerNavigationListenerGeneration(for: stick)
                 gcStick.valueChangedHandler = { _, xValue, yValue in
-                    handler(CGVector(dx: CGFloat(xValue), dy: CGFloat(yValue)))
+                    let offset = CGVector(dx: CGFloat(xValue), dy: CGFloat(yValue))
+                    dispatchControllerNavigationEventToMain(for: stick, generation: listenerGeneration) {
+                        handler(offset)
+                    }
                 }
             }
         }
@@ -1761,14 +1784,52 @@ import UIKit
         guard let elementMap = ControllerUtil.primaryControllerElementMap,
               let gcAxis = elementMap[stickAxis] as? GCControllerAxisInput else { return }
 
+        let listenerGeneration = advanceControllerNavigationListenerGeneration(for: stickAxis)
+        primaryControllerAxisStateLock.lock()
         primaryControllerAxisStates[stickAxis] = stickAxisState(for: CGFloat(gcAxis.value), threshold: threshold)
+        primaryControllerAxisStateLock.unlock()
         gcAxis.valueChangedHandler = { _, value in
             let newState = stickAxisState(for: CGFloat(value), threshold: threshold)
+            primaryControllerAxisStateLock.lock()
             let previousState = primaryControllerAxisStates[stickAxis] ?? .orderedSame
-            guard newState != previousState else { return }
-
             primaryControllerAxisStates[stickAxis] = newState
-            handler(newState)
+            primaryControllerAxisStateLock.unlock()
+            guard newState != previousState else { return }
+            dispatchControllerNavigationEventToMain(for: stickAxis, generation: listenerGeneration) {
+                handler(newState)
+            }
+        }
+    }
+
+    private static func advanceControllerNavigationListenerGeneration(for element: ControllerElement) -> UInt64 {
+        primaryControllerNavigationListenerLock.lock()
+        let generation = (primaryControllerNavigationListenerGenerations[element] ?? 0) &+ 1
+        primaryControllerNavigationListenerGenerations[element] = generation
+        primaryControllerNavigationListenerLock.unlock()
+        return generation
+    }
+
+    private static func invalidateControllerNavigationListener(for element: ControllerElement) {
+        _ = advanceControllerNavigationListenerGeneration(for: element)
+    }
+
+    private static func dispatchControllerNavigationEventToMain(
+        for element: ControllerElement,
+        generation: UInt64,
+        work: @escaping () -> Void
+    ) {
+        let deliverIfCurrent = {
+            primaryControllerNavigationListenerLock.lock()
+            let isCurrent = primaryControllerNavigationListenerGenerations[element] == generation
+            primaryControllerNavigationListenerLock.unlock()
+            if isCurrent {
+                work()
+            }
+        }
+        if Thread.isMainThread {
+            deliverIfCurrent()
+        } else {
+            DispatchQueue.main.async(execute: deliverIfCurrent)
         }
     }
 
@@ -2307,10 +2368,49 @@ final class GamepadOverlayStateCenter: NSObject, ObservableObject {
     static let shared = GamepadOverlayStateCenter()
 
     @Published private(set) var snapshot: GamepadOverlaySnapshot = .idle
+    private let snapshotLock = NSLock()
+    private var lastCaptureTime: CFTimeInterval = 0
+    private var pendingSnapshot: GamepadOverlaySnapshot?
+    private var publicationScheduled = false
+
+    private func shouldCaptureSnapshot() -> Bool {
+        snapshotLock.lock()
+        defer { snapshotLock.unlock() }
+        let now = CACurrentMediaTime()
+        guard lastCaptureTime == 0 || now - lastCaptureTime >= 1.0 / 60.0 else { return false }
+        lastCaptureTime = now
+        return true
+    }
+
+    func publish(profile: GCPhysicalInputProfile) {
+        guard shouldCaptureSnapshot() else { return }
+        publish(snapshot: GamepadOverlaySnapshot(profile: profile))
+    }
+
+    func publish(gamepad: GCExtendedGamepad) {
+        guard shouldCaptureSnapshot() else { return }
+        publish(snapshot: GamepadOverlaySnapshot(gamepad: gamepad))
+    }
 
     func publish(snapshot: GamepadOverlaySnapshot) {
+        snapshotLock.lock()
+        pendingSnapshot = snapshot
+        guard !publicationScheduled else {
+            snapshotLock.unlock()
+            return
+        }
+        publicationScheduled = true
+        snapshotLock.unlock()
+
         DispatchQueue.main.async {
-            self.snapshot = snapshot
+            self.snapshotLock.lock()
+            let latestSnapshot = self.pendingSnapshot
+            self.pendingSnapshot = nil
+            self.publicationScheduled = false
+            self.snapshotLock.unlock()
+            if let latestSnapshot {
+                self.snapshot = latestSnapshot
+            }
         }
     }
 

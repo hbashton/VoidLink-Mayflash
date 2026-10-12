@@ -16,10 +16,11 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-/// Small, opt-in-to-export diagnostic trace for controller/stream failures.
-/// Events are recorded asynchronously to a bounded file in Caches and can be
-/// exported by the user after reproducing a problem.
+/// Opt-in controller/stream trace. Events are written asynchronously to a
+/// bounded file in Caches and can be exported after reproducing a problem.
 @interface ControllerDiagnostics : NSObject
++ (BOOL)isEnabled;
++ (void)setEnabled:(BOOL)enabled;
 + (void)recordEvent:(NSString *)event fields:(NSDictionary<NSString *, id> *)fields;
 + (NSURL *)exportURL;
 @end

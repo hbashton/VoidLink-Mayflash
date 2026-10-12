@@ -101,6 +101,7 @@ static void recordStreamingRadialButtonSource(
     BOOL pressed,
     NSString *physicalElementName
 ) {
+    if (![ControllerDiagnostics isEnabled]) return;
     NSMutableDictionary<NSString *, id> *fields =
         [NSMutableDictionary dictionaryWithDictionary:diagnosticCommonControllerFields(controller)];
     fields[@"source_control"] = diagnosticLogicalControlName(buttonFlag);
@@ -139,6 +140,7 @@ static void recordControllerInputCallback(
     CGFloat leftTrigger,
     CGFloat rightTrigger
 ) {
+    if (![ControllerDiagnostics isEnabled]) return;
     CFTimeInterval now = CACurrentMediaTime();
     NSUInteger callbackCount;
     NSString *resolvedChangedElementName = changedElementName.length > 0
@@ -230,6 +232,7 @@ static void recordControllerInputCallback(
 }
 
 static void recordControllerInputWorkerDequeued(VoidController *controller, CFTimeInterval capturedAt) {
+    if (![ControllerDiagnostics isEnabled]) return;
     CFTimeInterval now = CACurrentMediaTime();
     NSUInteger processedCount;
     NSUInteger callbackCount;
@@ -260,9 +263,8 @@ static BOOL triggerValueIsDigitallyPressed(CGFloat value, BOOL wasPressed) {
 static char controllerInputQueueSpecificKey;
 
 static void dispatchControllerInputWork(dispatch_queue_t queue, dispatch_block_t work) {
-    // Keep all GameController handlers on the main queue because navigation and
-    // overlay handlers also run there. Only the captured streaming snapshot moves
-    // to this serial queue; work already on it can run inline without another hop.
+    // Generic-profile callbacks arrive on the dedicated input queue. Process
+    // their snapshots inline to avoid a main-queue wait and an extra queue hop.
     if (dispatch_get_specific(&controllerInputQueueSpecificKey) == &controllerInputQueueSpecificKey) {
         work();
     } else {
@@ -1344,21 +1346,21 @@ static void dispatchControllerInputWork(dispatch_queue_t queue, dispatch_block_t
                                                          [self getActiveGamepadMask],
                                                          buttonFlags, leftTrigger, rightTrigger,
                                                          leftStickX, leftStickY, rightStickX, rightStickY);
-            CFTimeInterval now = CACurrentMediaTime();
             BOOL shouldRecordSendSummary = NO;
-            NSUInteger inputPacketCount = 0;
-            NSUInteger callbackCount = 0;
-            NSUInteger processedSnapshotCount = 0;
-            CFTimeInterval callbackCapturedAt = 0;
-            @synchronized (controller) {
-                inputPacketCount = ++controller.diagnosticInputPacketsSent;
-                callbackCount = controller.diagnosticInputCallbacks;
-                processedSnapshotCount = controller.diagnosticInputSnapshotsProcessed;
-                callbackCapturedAt = controller.diagnosticCurrentSnapshotCapturedAt;
-                shouldRecordSendSummary = inputResult != 0
-                    ? (controller.diagnosticLastSendLogTime == 0 || now - controller.diagnosticLastSendLogTime >= 3.0)
-                    : (controller.diagnosticLastSendLogTime == 0 || now - controller.diagnosticLastSendLogTime >= 2.0);
-                if (shouldRecordSendSummary) controller.diagnosticLastSendLogTime = now;
+            NSUInteger inputPacketCount = 0, callbackCount = 0, processedSnapshotCount = 0;
+            CFTimeInterval callbackCapturedAt = 0, now = 0;
+            if ([ControllerDiagnostics isEnabled]) {
+                now = CACurrentMediaTime();
+                @synchronized (controller) {
+                    inputPacketCount = ++controller.diagnosticInputPacketsSent;
+                    callbackCount = controller.diagnosticInputCallbacks;
+                    processedSnapshotCount = controller.diagnosticInputSnapshotsProcessed;
+                    callbackCapturedAt = controller.diagnosticCurrentSnapshotCapturedAt;
+                    shouldRecordSendSummary = inputResult != 0
+                        ? (controller.diagnosticLastSendLogTime == 0 || now - controller.diagnosticLastSendLogTime >= 3.0)
+                        : (controller.diagnosticLastSendLogTime == 0 || now - controller.diagnosticLastSendLogTime >= 2.0);
+                    if (shouldRecordSendSummary) controller.diagnosticLastSendLogTime = now;
+                }
             }
             if (shouldRecordSendSummary) {
                 NSMutableDictionary<NSString *, id> *fields = [NSMutableDictionary dictionaryWithDictionary:diagnosticCommonControllerFields(controller)];
@@ -1385,7 +1387,7 @@ static void dispatchControllerInputWork(dispatch_queue_t queue, dispatch_block_t
                 controller.didLogControllerInputFailure = NO;
             }
         }
-        controller.diagnosticCurrentSnapshotCapturedAt = 0;
+        if ([ControllerDiagnostics isEnabled]) controller.diagnosticCurrentSnapshotCapturedAt = 0;
     }
     [_controllerStreamLock unlock];
     
@@ -2221,7 +2223,9 @@ double rc_expo(double x, double expo) {
             if (newlyClaimedSlot) {
                 Log(LOG_I, @"Controller %@ received its first input; requesting a Sunshine port",
                     controller.vendorName ?: @"controller");
-                [ControllerDiagnostics recordEvent:@"controller_first_input_claimed" fields:diagnosticCommonControllerFields(voidController)];
+                if ([ControllerDiagnostics isEnabled]) {
+                    [ControllerDiagnostics recordEvent:@"controller_first_input_claimed" fields:diagnosticCommonControllerFields(voidController)];
+                }
                 [self->_controllerStreamLock lock];
                 [self reportControllerArrivalLocked:voidController];
                 [self->_controllerStreamLock unlock];
@@ -2332,7 +2336,7 @@ double rc_expo(double x, double expo) {
 - (void) listenToGenericGCController:(GCController*) controller API_AVAILABLE(ios(16.0), tvos(16.0)) {
      [ControllerUtil listenPhysicalProfileWithController:controller
                                              swapABXY:self->_swapABXYButtons
-                                          handlerQueue:dispatch_get_main_queue()
+                                          handlerQueue:self->_controllerInputQueue
                                                handler:^(NSDictionary *elementDict, GCPhysicalInputProfile *profile, GCControllerElement *changedElement, NSString *changedElementName) {
         NSUInteger orderGeneration = 0;
         [self->_controllerStreamLock lock];
@@ -2451,7 +2455,9 @@ double rc_expo(double x, double expo) {
             if (newlyClaimedSlot) {
                 Log(LOG_I, @"Generic controller %@ received its first input; requesting a Sunshine port",
                     controller.vendorName ?: @"controller");
-                [ControllerDiagnostics recordEvent:@"controller_first_input_claimed" fields:diagnosticCommonControllerFields(voidController)];
+                if ([ControllerDiagnostics isEnabled]) {
+                    [ControllerDiagnostics recordEvent:@"controller_first_input_claimed" fields:diagnosticCommonControllerFields(voidController)];
+                }
                 [self->_controllerStreamLock lock];
                 [self reportControllerArrivalLocked:voidController];
                 [self->_controllerStreamLock unlock];
@@ -2588,9 +2594,9 @@ double rc_expo(double x, double expo) {
 {
     if (controller != NULL) {
         if (@available(iOS 14.0, tvOS 14.0, *)) {
-            // GameController.handlerQueue applies to every callback registered on
-            // the controller, including UI navigation handlers. Keep those on main;
-            // streaming snapshots are forwarded to _controllerInputQueue below.
+            // Extended gamepads keep their current queue. Generic profiles move
+            // to _controllerInputQueue in listenPhysicalProfile; UI-only listeners
+            // dispatch to main before touching views or navigation state.
             controller.handlerQueue = dispatch_get_main_queue();
         }
 

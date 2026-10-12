@@ -9,11 +9,24 @@
 #import "Logger.h"
 #import <QuartzCore/QuartzCore.h>
 #import <UIKit/UIKit.h>
+#import <stdatomic.h>
 
 static const unsigned long long ControllerDiagnosticsMaximumFileSize = 1024 * 1024;
 static char ControllerDiagnosticsQueueKey;
+static atomic_bool ControllerDiagnosticsEnabled = ATOMIC_VAR_INIT(false);
+static dispatch_once_t ControllerDiagnosticsEnabledOnce;
+static BOOL ControllerDiagnosticsSessionStarted;
+static NSString *ControllerDiagnosticsPreferenceKey = @"controllerDiagnosticsEnabled";
 
 @implementation ControllerDiagnostics
+
++ (BOOL)isEnabled {
+    dispatch_once(&ControllerDiagnosticsEnabledOnce, ^{
+        id storedValue = [[NSUserDefaults standardUserDefaults] objectForKey:ControllerDiagnosticsPreferenceKey];
+        atomic_store_explicit(&ControllerDiagnosticsEnabled, storedValue != nil && [storedValue boolValue], memory_order_relaxed);
+    });
+    return atomic_load_explicit(&ControllerDiagnosticsEnabled, memory_order_relaxed);
+}
 
 + (dispatch_queue_t)diagnosticsQueue {
     static dispatch_queue_t queue;
@@ -106,17 +119,43 @@ static char ControllerDiagnosticsQueueKey;
     }
 }
 
-+ (void)recordEvent:(NSString *)event fields:(NSDictionary<NSString *,id> *)fields {
++ (void)setEnabled:(BOOL)enabled {
+    // Stop accepting hot-path events immediately when disabling. All file and
+    // queue state is then changed on the diagnostics queue to preserve ordering.
+    if (!enabled) {
+        (void)[self isEnabled];
+        atomic_store_explicit(&ControllerDiagnosticsEnabled, false, memory_order_relaxed);
+    }
+
     dispatch_queue_t queue = [self diagnosticsQueue];
-    static dispatch_once_t sessionStartToken;
-    dispatch_once(&sessionStartToken, ^{
-        NSDictionary *sessionRecord = [self recordForEvent:@"diagnostics_session_started" fields:@{}];
-        dispatch_async(queue, ^{
-            [self appendRecord:sessionRecord];
-        });
-    });
+    void (^updateState)(void) = ^{
+        [[NSUserDefaults standardUserDefaults] setBool:enabled forKey:ControllerDiagnosticsPreferenceKey];
+        atomic_store_explicit(&ControllerDiagnosticsEnabled, enabled, memory_order_relaxed);
+        if (!enabled) ControllerDiagnosticsSessionStarted = NO;
+        if (enabled && !ControllerDiagnosticsSessionStarted) {
+            [self appendRecord:[self recordForEvent:@"diagnostics_session_started" fields:@{}]];
+            ControllerDiagnosticsSessionStarted = YES;
+        }
+    };
+
+    if (dispatch_get_specific(&ControllerDiagnosticsQueueKey) != NULL) {
+        updateState();
+    } else {
+        dispatch_sync(queue, updateState);
+    }
+}
+
++ (void)recordEvent:(NSString *)event fields:(NSDictionary<NSString *,id> *)fields {
+    if (![self isEnabled]) return;
+
+    dispatch_queue_t queue = [self diagnosticsQueue];
     NSDictionary *record = [self recordForEvent:event fields:fields];
     dispatch_async(queue, ^{
+        if (![self isEnabled]) return;
+        if (!ControllerDiagnosticsSessionStarted) {
+            [self appendRecord:[self recordForEvent:@"diagnostics_session_started" fields:@{}]];
+            ControllerDiagnosticsSessionStarted = YES;
+        }
         [self appendRecord:record];
     });
 }
