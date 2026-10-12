@@ -260,9 +260,9 @@ static BOOL triggerValueIsDigitallyPressed(CGFloat value, BOOL wasPressed) {
 static char controllerInputQueueSpecificKey;
 
 static void dispatchControllerInputWork(dispatch_queue_t queue, dispatch_block_t work) {
-    // GameController callbacks are delivered directly on this queue while streaming.
-    // Run the snapshot there instead of adding another queue hop. Keep the fallback
-    // for callbacks that arrive from other queues (for example, on older OS versions).
+    // Keep all GameController handlers on the main queue because navigation and
+    // overlay handlers also run there. Only the captured streaming snapshot moves
+    // to this serial queue; work already on it can run inline without another hop.
     if (dispatch_get_specific(&controllerInputQueueSpecificKey) == &controllerInputQueueSpecificKey) {
         work();
     } else {
@@ -2332,7 +2332,7 @@ double rc_expo(double x, double expo) {
 - (void) listenToGenericGCController:(GCController*) controller API_AVAILABLE(ios(16.0), tvos(16.0)) {
      [ControllerUtil listenPhysicalProfileWithController:controller
                                              swapABXY:self->_swapABXYButtons
-                                          handlerQueue:self->_controllerInputQueue
+                                          handlerQueue:dispatch_get_main_queue()
                                                handler:^(NSDictionary *elementDict, GCPhysicalInputProfile *profile, GCControllerElement *changedElement, NSString *changedElementName) {
         NSUInteger orderGeneration = 0;
         [self->_controllerStreamLock lock];
@@ -2588,8 +2588,10 @@ double rc_expo(double x, double expo) {
 {
     if (controller != NULL) {
         if (@available(iOS 14.0, tvOS 14.0, *)) {
-            // Keep HID callbacks off the main UI queue while a stream is active.
-            controller.handlerQueue = _controllerInputQueue;
+            // GameController.handlerQueue applies to every callback registered on
+            // the controller, including UI navigation handlers. Keep those on main;
+            // streaming snapshots are forwarded to _controllerInputQueue below.
+            controller.handlerQueue = dispatch_get_main_queue();
         }
 
         // iOS 13 allows the Start button to behave like a normal button, however
