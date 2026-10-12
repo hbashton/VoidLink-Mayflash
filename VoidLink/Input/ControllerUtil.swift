@@ -2382,6 +2382,7 @@ final class GamepadOverlayStateCenter: NSObject, ObservableObject {
         return true
     }
 
+    @available(iOS 14.0, tvOS 14.0, *)
     func publish(profile: GCPhysicalInputProfile) {
         guard shouldCaptureSnapshot() else { return }
         publish(snapshot: GamepadOverlaySnapshot(profile: profile))
