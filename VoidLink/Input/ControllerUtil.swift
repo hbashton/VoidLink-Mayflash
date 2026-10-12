@@ -1231,7 +1231,8 @@ import UIKit
     ) {
         // Use per-button handlers so a temporary settings capture does not replace
         // ControllerSupport's physicalInputProfile.valueDidChangeHandler.
-        controller.handlerQueue = DispatchQueue.main
+        // Preserve the current queue. In a stream this is the high-priority input queue;
+        // capture handlers dispatch UI updates to main when they need to touch the UI.
         let mapping = buildPhysicalMapping(for: controller.physicalInputProfile, swapABXY: false)
         for (element, input) in mapping {
             guard let button = input as? GCControllerButtonInput else { continue }
